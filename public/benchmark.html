@@ -145,9 +145,11 @@ function workerRun(bitmap) {
         fetch(`/benchmark-fixtures/${name}.png`).then((response) => response.blob()),
         fetch(`/benchmark-fixtures/${name}.json`).then((response) => response.json()),
       ]);
+      const includesColdStart = globalRunIndex === 0;
+      const runCount = includesColdStart ? 2 : 1;
       const runs = [];
       let geometry;
-      for (let index = 0; index < 3; index += 1) {
+      for (let index = 0; index < runCount; index += 1) {
         const bitmap = await createImageBitmap(blob);
         const measured = await workerRun(bitmap);
         runs.push(measured.ms);
@@ -165,13 +167,14 @@ function workerRun(bitmap) {
       const rows = Math.max(0, ...cells.map((cell) => cell.row + (cell.rowSpan || 1)));
       const columns = Math.max(0, ...cells.map((cell) => cell.column + (cell.columnSpan || 1)));
       const cellPlacement = placement(expected.ocrBoxes || [], cells);
+      const warmProcessingMs = includesColdStart ? runs[1] : runs[0];
       cases.push({
         fixture: `${name}.png`,
         kind: expected.kind,
         imageBytes: blob.size,
+        includesColdStart,
         coldOrFirstRunMs: Number(runs[0].toFixed(2)),
-        warmMedianMs: Number(median(runs.slice(1)).toFixed(2)),
-        firstGlobalRun: globalRunIndex === 3,
+        warmProcessingMs: Number(warmProcessingMs.toFixed(2)),
         rowAccuracy: Number(countAccuracy(expected.rows, rows).toFixed(4)),
         columnAccuracy: Number(countAccuracy(expected.columns, columns).toFixed(4)),
         cellCountAccuracy: Number(countAccuracy(expected.cellCount, cells.length).toFixed(4)),
@@ -202,10 +205,11 @@ function workerRun(bitmap) {
     const result = {
       candidate: "A - Browser OpenCV.js geometry plus Vercel OCR",
       workerReuse: "one persistent worker and one lazy OpenCV instance",
+      totalGeometryPasses: globalRunIndex,
       cases,
       summary: {
         coldInitializationAndFirstRunMs: cases[0]?.coldOrFirstRunMs ?? null,
-        medianWarmMs: Number(median(cases.map((item) => item.warmMedianMs)).toFixed(2)),
+        medianWarmMs: Number(median(cases.map((item) => item.warmProcessingMs)).toFixed(2)),
         meanRowAccuracy: Number((cases.reduce((sum, item) => sum + item.rowAccuracy, 0) / cases.length).toFixed(4)),
         meanColumnAccuracy: Number((cases.reduce((sum, item) => sum + item.columnAccuracy, 0) / cases.length).toFixed(4)),
         meanCellCountAccuracy: Number((cases.reduce((sum, item) => sum + item.cellCountAccuracy, 0) / cases.length).toFixed(4)),
