@@ -1,6 +1,8 @@
 export interface PreparedImage { uploadBlob: Blob; previewUrl: string; originalBytes: number; processedBytes: number; originalWidth: number; originalHeight: number; processedWidth: number; processedHeight: number; mimeType: string; warnings: string[]; }
 export interface ImagePreparationOptions { maxDimension?: number; targetBytes?: number; minimumReadableDimension?: number; }
 
+type TwoDimensionalContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+
 const canvasToBlob = async (canvas: OffscreenCanvas | HTMLCanvasElement, type: string, quality?: number): Promise<Blob> => {
   if (typeof OffscreenCanvas !== "undefined" && canvas instanceof OffscreenCanvas) return canvas.convertToBlob({ type, quality });
   return new Promise<Blob>((resolve, reject) => (canvas as HTMLCanvasElement).toBlob((blob) => blob ? resolve(blob) : reject(new Error("Image encoding failed")), type, quality));
@@ -8,6 +10,11 @@ const canvasToBlob = async (canvas: OffscreenCanvas | HTMLCanvasElement, type: s
 const makeCanvas = (width: number, height: number): OffscreenCanvas | HTMLCanvasElement => {
   if (typeof OffscreenCanvas !== "undefined") return new OffscreenCanvas(width, height);
   const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height; return canvas;
+};
+const get2dContext = (canvas: OffscreenCanvas | HTMLCanvasElement): TwoDimensionalContext => {
+  const context = canvas.getContext("2d", { alpha: false }) as TwoDimensionalContext | null;
+  if (!context) throw new Error("Browser canvas is unavailable");
+  return context;
 };
 
 export async function prepareImageForOcr(file: File, options: ImagePreparationOptions = {}): Promise<PreparedImage> {
@@ -17,7 +24,7 @@ export async function prepareImageForOcr(file: File, options: ImagePreparationOp
   const originalWidth = bitmap.width; const originalHeight = bitmap.height; const firstScale = Math.min(1, maxDimension / Math.max(originalWidth, originalHeight));
   let width = Math.max(1, Math.round(originalWidth * firstScale)); let height = Math.max(1, Math.round(originalHeight * firstScale));
   const render = async (nextWidth: number, nextHeight: number, mimeType: string, quality?: number) => {
-    const canvas = makeCanvas(nextWidth, nextHeight); const context = canvas.getContext("2d", { alpha: false }); if (!context) throw new Error("Browser canvas is unavailable");
+    const canvas = makeCanvas(nextWidth, nextHeight); const context = get2dContext(canvas);
     context.fillStyle = "#fff"; context.fillRect(0, 0, nextWidth, nextHeight); context.imageSmoothingEnabled = true; context.imageSmoothingQuality = "high"; context.drawImage(bitmap, 0, 0, nextWidth, nextHeight);
     return canvasToBlob(canvas, mimeType, quality);
   };
