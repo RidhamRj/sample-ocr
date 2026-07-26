@@ -1,0 +1,32 @@
+{
+  "name": "sample-ocr",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "benchmark:fixtures": "python3 benchmarks/generate_fixtures.py",
+    "benchmark:python": "python3 benchmarks/run_python_benchmark.py",
+    "check:python": "python3 -m unittest discover -s tests -p 'test_*.py'",
+    "prepare:opencv": "node scripts/fetch-opencv.mjs",
+    "prebuild": "npm run prepare:opencv",
+    "benchmark:browser": "node benchmarks/run_browser_benchmark.mjs"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5",
+    "vitest": "^3.2.4"
+  }
+}

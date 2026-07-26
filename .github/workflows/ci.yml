@@ -1,0 +1,128 @@
+name: image-to-excel validation
+
+on:
+  push:
+    branches:
+      - main
+      - agents/image-to-excel-cell-reconstruction-v1
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-and-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install frontend dependencies
+        run: npm install --no-audit --no-fund
+      - name: Generate locked benchmark fixtures
+        run: |
+          python3 -m pip install --disable-pip-version-check Pillow==11.1.0
+          npm run benchmark:fixtures
+      - name: Download official OpenCV.js
+        run: npm run prepare:opencv
+      - name: Unit-test fusion and XLSX
+        run: npm test
+      - name: Build static frontend
+        run: npm run build
+      - name: Run browser OpenCV benchmark
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+        run: npm run benchmark:browser
+      - name: Record static bundle measurements
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          files = [path for path in Path('dist').rglob('*') if path.is_file()]
+          payload = {
+              'distBytes': sum(path.stat().st_size for path in files),
+              'opencvJsBytes': Path('public/vendor/opencv.js').stat().st_size,
+              'largestStaticFiles': sorted(
+                  ({'path': str(path), 'bytes': path.stat().st_size} for path in files),
+                  key=lambda item: item['bytes'], reverse=True,
+              )[:10],
+          }
+          Path('benchmarks/results').mkdir(parents=True, exist_ok=True)
+          Path('benchmarks/results/static-bundle.json').write_text(json.dumps(payload, indent=2))
+          print(json.dumps(payload, indent=2))
+          PY
+      - name: Install LibreOffice when missing
+        run: |
+          if ! command -v libreoffice >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libreoffice-calc
+          fi
+      - name: Verify XLSX with OpenPyXL and LibreOffice
+        run: |
+          python3 -m pip install --disable-pip-version-check openpyxl==3.1.5
+          python3 scripts/verify_xlsx.py benchmarks/results/browser-export-compatibility.xlsx
+      - name: Upload frontend benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-browser-evidence
+          path: |
+            benchmarks/results/candidate-a.json
+            benchmarks/results/static-bundle.json
+            benchmarks/results/browser-export-compatibility.xlsx
+            benchmarks/results/browser-export-compatibility.compatibility.json
+            dist/
+
+  python-ocr-and-candidate-b:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install OCR runtime
+        run: pip install --disable-pip-version-check -r requirements-benchmark.txt
+      - name: Generate shared fixtures
+        run: python3 benchmarks/generate_fixtures.py
+      - name: Python tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Candidate B benchmark
+        run: python3 benchmarks/run_python_benchmark.py
+      - name: RapidOCR self-test and bundle measurement
+        run: |
+          python3 - <<'PY'
+          import asyncio
+          import json
+          import site
+          from pathlib import Path
+          from api.ocr_core import self_test
+
+          result = asyncio.run(self_test(None))
+          if result['status'] != 'ok':
+              raise SystemExit(f"RapidOCR self-test failed: {result}")
+          site_paths = [Path(path) for path in site.getsitepackages() if Path(path).exists()]
+          package_bytes = sum(
+              file.stat().st_size
+              for root in site_paths
+              for file in root.rglob('*')
+              if file.is_file()
+          )
+          payload = {'selfTest': result, 'installedSitePackagesBytes': package_bytes}
+          Path('benchmarks/results').mkdir(parents=True, exist_ok=True)
+          Path('benchmarks/results/python-runtime.json').write_text(json.dumps(payload, indent=2))
+          print(json.dumps(payload, indent=2))
+          PY
+      - name: Confirm production isolation
+        run: |
+          ! grep -R -n -E 'supplierInvoiceLayoutStrategy|inventory|database|migration' api src public/opencv-worker.js
+          ! grep -R -n -E 'from .*PharmacyCare|import .*PharmacyCare|PharmacyCare\.git' api src public scripts
+      - name: Upload Python benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-ocr-evidence
+          path: |
+            benchmarks/results/candidate-b.json
+            benchmarks/results/python-runtime.json
