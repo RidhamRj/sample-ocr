@@ -1,0 +1,33 @@
+name: bootstrap source tree
+
+on:
+  push:
+    branches:
+      - agents/image-to-excel-cell-reconstruction-v1
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    if: ${{ !contains(github.event.head_commit.message, '[bootstrap-complete]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Expand standalone source tree
+        run: |
+          tar -xzf .bootstrap/source.tar.gz -C .
+          rm -rf .bootstrap
+          rm -f .github/workflows/bootstrap.yml
+      - name: Commit expanded source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No bootstrap changes found"
+            exit 1
+          fi
+          git commit -m "build standalone image-to-excel reconstruction [bootstrap-complete]"
+          git push

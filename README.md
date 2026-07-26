@@ -1,5 +1,3 @@
-# sample-ocr
+# sample-ocr bootstrap
 
-Standalone browser-first image-to-Excel reconstruction application.
-
-Implementation work lives on `agents/image-to-excel-cell-reconstruction-v1`.
+This branch is being initialized by the one-time source bootstrap workflow.
