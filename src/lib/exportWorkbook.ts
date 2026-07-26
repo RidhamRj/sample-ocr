@@ -25,7 +25,7 @@ export async function buildCanonicalWorkbookBuffer(canonical: CanonicalDocument)
   const raw = workbook.addWorksheet("Raw OCR"); raw.columns = ocrColumns(); canonical.rawOcr.forEach((item) => raw.addRow({ page: item.pageNumber, order: item.readingOrder, text: item.text, confidence: item.confidence, box: JSON.stringify(item.box) }));
   const unassigned = workbook.addWorksheet("Unassigned OCR"); unassigned.columns = ocrColumns(); canonical.unassignedOcr.forEach((item) => unassigned.addRow({ page: item.pageNumber, order: item.readingOrder, text: item.text, confidence: item.confidence, box: JSON.stringify(item.box) }));
   const diagnostics = workbook.addWorksheet("Diagnostics"); diagnostics.columns = [{ header: "Key", key: "key", width: 36 }, { header: "Value", key: "value", width: 80 }]; Object.entries(canonical.diagnostics).forEach(([key, value]) => diagnostics.addRow({ key, value: typeof value === "string" ? value : JSON.stringify(value) }));
-  const buffer = await workbook.xlsx.writeBuffer(); return buffer instanceof ArrayBuffer ? buffer : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+  return workbook.xlsx.writeBuffer();
 }
 
 export async function exportCanonicalWorkbook(canonical: CanonicalDocument): Promise<void> {
