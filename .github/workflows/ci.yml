@@ -87,8 +87,10 @@ jobs:
         run: pip install --disable-pip-version-check -r requirements-benchmark.txt
       - name: Generate shared fixtures
         run: python3 benchmarks/generate_fixtures.py
-      - name: Python tests
-        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Python OCR contract tests
+        run: python3 -m unittest discover -s tests -p 'test_ocr_core.py' -v
+      - name: Candidate B geometry tests
+        run: python3 -m unittest discover -s tests -p 'test_candidate_b_geometry.py' -v
       - name: Candidate B benchmark
         run: python3 benchmarks/run_python_benchmark.py
       - name: RapidOCR self-test and bundle measurement
