@@ -1,7 +1,7 @@
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-const sourceUrl = process.env.OPENCV_JS_URL || "https://docs.opencv.org/4.13.0/opencv.js";
+const sourceUrl = process.env.OPENCV_JS_URL || "https://docs.opencv.org/4.10.0/opencv.js";
 const destination = resolve("public/vendor/opencv.js");
 const minimumExpectedBytes = 750_000;
 
