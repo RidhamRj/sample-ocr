@@ -1,0 +1,64 @@
+name: Gemini invoice validation
+
+on:
+  push:
+    branches:
+      - main
+      - agents/gemini-invoice-json-v1
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Validate Vercel API syntax
+        run: npm run check:api
+      - name: Test invoice normalization and validation
+        run: npx vitest run tests/invoiceValidation.test.ts --reporter=verbose
+      - name: Test Gemini API contract
+        run: npx vitest run tests/geminiApiContract.test.ts --reporter=verbose
+      - name: Test JSON-to-Excel workbook
+        run: npx vitest run tests/exportGeminiWorkbook.test.ts --reporter=verbose
+      - name: Build TypeScript and Vite frontend
+        run: npm run build
+      - name: Record deployable bundle size
+        run: |
+          node - <<'NODE'
+          const { readdirSync, statSync, writeFileSync, mkdirSync } = require('node:fs');
+          const { join, relative } = require('node:path');
+          const files = [];
+          function walk(root) {
+            for (const name of readdirSync(root)) {
+              const path = join(root, name);
+              const stat = statSync(path);
+              if (stat.isDirectory()) walk(path);
+              else files.push({ path: relative('.', path), bytes: stat.size });
+            }
+          }
+          walk('dist');
+          const payload = {
+            distBytes: files.reduce((sum, file) => sum + file.bytes, 0),
+            apiBytes: statSync('api/gemini-invoice.js').size,
+            largestFiles: files.sort((a, b) => b.bytes - a.bytes).slice(0, 10),
+          };
+          mkdirSync('build-evidence', { recursive: true });
+          writeFileSync('build-evidence/bundle.json', JSON.stringify(payload, null, 2));
+          console.log(JSON.stringify(payload, null, 2));
+          NODE
+      - name: Upload deployable evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-invoice-build
+          path: |
+            dist/
+            build-evidence/bundle.json

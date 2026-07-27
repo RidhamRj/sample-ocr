@@ -1,0 +1,27 @@
+{
+  "name": "sample-ocr",
+  "private": true,
+  "version": "2.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run tests/invoiceValidation.test.ts tests/exportGeminiWorkbook.test.ts tests/geminiApiContract.test.ts",
+    "check:api": "node --check api/gemini-invoice.js",
+    "validate": "npm run check:api && npm test && npm run build"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5",
+    "vitest": "^3.2.4"
+  }
+}
