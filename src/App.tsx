@@ -6,6 +6,7 @@ import { prepareInvoiceImage } from "./lib/prepareInvoiceImage";
 import type {
   GeminiInvoiceJson,
   GeminiServiceStatus,
+  GstJurisdiction,
   PreparedInvoiceImage,
   SummaryKind,
 } from "./types/invoice";
@@ -34,8 +35,19 @@ const SUMMARY_KINDS: SummaryKind[] = [
   "other",
 ];
 
+const GST_JURISDICTIONS: Array<{ value: GstJurisdiction; label: string }> = [
+  { value: "intrastate", label: "Intrastate — CGST + SGST" },
+  { value: "interstate", label: "Interstate — IGST" },
+  { value: "not_applicable", label: "GST not applicable" },
+  { value: "unknown", label: "Unknown — needs review" },
+];
+
 const DEMO_RESULT: GeminiInvoiceJson = {
   documentType: "Tax invoice",
+  supplierName: "DEMO PHARMA DISTRIBUTORS",
+  invoiceNumber: "INV/2026/0142",
+  billDate: "27/07/2026",
+  gstJurisdiction: "intrastate",
   tableTitle: "Medicine purchase items",
   currency: "INR",
   columns: [
@@ -150,7 +162,7 @@ export default function App() {
     setProcessing(true);
     setResult(null);
     setError(null);
-    setStatus("Gemini is identifying printed columns, item rows, taxes, and the final amount…");
+    setStatus("Gemini is identifying supplier details, invoice identity, item rows, taxes, and the final amount…");
     try {
       const invoice = normalizeInvoice(await analyzeInvoice({
         apiKey: serverKeyConfigured ? undefined : apiKey,
@@ -178,6 +190,14 @@ export default function App() {
     abortRef.current?.abort();
     setProcessing(false);
     setStatus("Request cancelled.");
+  };
+
+  const updateDocumentText = (field: "supplierName" | "invoiceNumber" | "billDate", value: string) => {
+    setResult((current) => current ? normalizeInvoice({ ...current, [field]: value }) : current);
+  };
+
+  const updateGstJurisdiction = (value: GstJurisdiction) => {
+    setResult((current) => current ? normalizeInvoice({ ...current, gstJurisdiction: value }) : current);
   };
 
   const updateColumnHeader = (columnIndex: number, value: string) => {
@@ -261,7 +281,7 @@ export default function App() {
         <div>
           <span className="eyebrow">Gemini vision → strict JSON → editable Excel</span>
           <h1>Invoice table extractor</h1>
-          <p>Gemini reads the invoice layout, detects printed column headings and item rows, preserves all tax and total lines, and returns strict JSON. The workbook is generated locally from the reviewed JSON.</p>
+          <p>Gemini reads supplier and invoice identity, the printed table layout, every item row, GST jurisdiction, taxes, and final amount. The workbook is generated locally from the reviewed JSON.</p>
         </div>
         <div className="privacy-badge">No database · no GPU · key never committed</div>
       </header>
@@ -323,6 +343,15 @@ export default function App() {
         {activeTab === "table" && <div className="table-layout">
           {prepared && <aside className="source-preview"><h3>Source image</h3><img src={prepared.previewUrl} alt="Invoice source" /></aside>}
           <div className="table-card">
+            <div className="invoice-meta-editor">
+              <div className="summary-toolbar"><h3>Supplier and invoice details</h3><span>Edit these before downloading or integrating the JSON.</span></div>
+              <div className="invoice-meta-grid">
+                <label><span>Supplier name</span><input value={result.supplierName ?? ""} onChange={(event) => updateDocumentText("supplierName", event.target.value)} placeholder="Printed supplier/vendor name" /></label>
+                <label><span>Invoice number</span><input value={result.invoiceNumber ?? ""} onChange={(event) => updateDocumentText("invoiceNumber", event.target.value)} placeholder="Printed invoice or bill number" /></label>
+                <label><span>Bill date</span><input value={result.billDate ?? ""} onChange={(event) => updateDocumentText("billDate", event.target.value)} placeholder="Preserve printed date format" /></label>
+                <label><span>GST jurisdiction</span><select value={result.gstJurisdiction} onChange={(event) => updateGstJurisdiction(event.target.value as GstJurisdiction)}>{GST_JURISDICTIONS.map((entry) => <option key={entry.value} value={entry.value}>{entry.label}</option>)}</select></label>
+              </div>
+            </div>
             <div className="table-actions"><button className="ghost-button" onClick={addRow}>Add missing row</button><span>Edit headings and cells before downloading.</span></div>
             <div className="table-scroll"><table><thead><tr><th className="row-index">#</th>{result.columns.map((column, columnIndex) => <th key={column.id}><input className="column-header-input" value={column.header} onChange={(event) => updateColumnHeader(columnIndex, event.target.value)} aria-label={`Column ${columnIndex + 1} heading`} /></th>)}<th className="row-action-header">Action</th></tr></thead><tbody>{result.rows.map((row, rowIndex) => <tr key={`${row.rowNumber}-${rowIndex}`}><td className="row-index">{row.rowNumber}</td>{result.columns.map((column, columnIndex) => <td key={column.id}><textarea value={row.values[columnIndex] ?? ""} onChange={(event) => updateCell(rowIndex, columnIndex, event.target.value)} aria-label={`Row ${row.rowNumber} ${column.header}`} /></td>)}<td className="row-action-cell"><button className="danger-button" onClick={() => deleteRow(rowIndex)} aria-label={`Delete row ${row.rowNumber}`}>Delete</button></td></tr>)}</tbody></table></div>
             <div className="summary-editor">
@@ -341,7 +370,7 @@ export default function App() {
         {activeTab === "json" && <pre className="json-view">{JSON.stringify(result, null, 2)}</pre>}
       </section>}
 
-      <footer><strong>Important:</strong> This is an extraction assistant. Verify batch, expiry, quantity, rate, taxes, and final amount before importing anything into pharmacy inventory. Free-tier invoice content may be processed under Google's free-tier data terms.</footer>
+      <footer><strong>Important:</strong> This is an extraction assistant. Verify supplier, invoice number, bill date, GST jurisdiction, batch, expiry, quantity, rate, taxes, and final amount before importing anything into pharmacy inventory. Free-tier invoice content may be processed under Google's free-tier data terms.</footer>
     </main>
   );
 }
