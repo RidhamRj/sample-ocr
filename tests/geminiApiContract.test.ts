@@ -18,6 +18,30 @@ describe("Gemini API contract", () => {
     expect(resolveRequestedModel("unknown-model")).toBe(DEFAULT_MODEL);
   });
 
+  it("requires supplier identity and GST jurisdiction in structured output", () => {
+    const properties = invoiceSchema.properties as Record<string, { type?: string; nullable?: boolean; enum?: string[] }>;
+    expect(properties.supplierName.nullable).toBe(true);
+    expect(properties.invoiceNumber.nullable).toBe(true);
+    expect(properties.billDate.nullable).toBe(true);
+    expect(properties.gstJurisdiction.enum).toEqual([
+      "intrastate",
+      "interstate",
+      "not_applicable",
+      "unknown",
+    ]);
+    expect(invoiceSchema.required).toEqual(expect.arrayContaining([
+      "supplierName",
+      "invoiceNumber",
+      "billDate",
+      "gstJurisdiction",
+    ]));
+    expect(extractionPrompt).toContain("supplierName must be the exact printed");
+    expect(extractionPrompt).toContain("invoiceNumber must preserve the exact printed");
+    expect(extractionPrompt).toContain("billDate must preserve the exact printed");
+    expect(extractionPrompt).toContain("CGST and SGST");
+    expect(extractionPrompt).toContain("IGST");
+  });
+
   it("uses structured nullable fields supported by Gemini", () => {
     const properties = invoiceSchema.properties as Record<string, { type?: string; nullable?: boolean }>;
     expect(properties.finalAmount.type).toBe("string");
@@ -27,9 +51,13 @@ describe("Gemini API contract", () => {
     expect(extractionPrompt).toContain("finalAmount");
   });
 
-  it("normalizes duplicate ids and preserves blank positions", () => {
+  it("normalizes metadata, duplicate ids, and blank positions", () => {
     const result = validateInvoice({
       documentType: "Tax Invoice",
+      supplierName: "ABC Pharma Agencies",
+      invoiceNumber: "INV/0042",
+      billDate: "27/07/2026",
+      gstJurisdiction: "intrastate",
       tableTitle: null,
       currency: "INR",
       columns: [
@@ -49,10 +77,27 @@ describe("Gemini API contract", () => {
       extractionConfidence: 0.8,
     });
 
+    expect(result.supplierName).toBe("ABC Pharma Agencies");
+    expect(result.invoiceNumber).toBe("INV/0042");
+    expect(result.billDate).toBe("27/07/2026");
+    expect(result.gstJurisdiction).toBe("intrastate");
     expect(result.columns.map((column: { id: string }) => column.id)).toEqual(["amount", "amount_2", "batch_no"]);
     expect(result.rows[0].values).toEqual(["10.00", null, null]);
     expect(result.summaryRows[0].kind).toBe("cgst");
     expect(result.finalAmount).toBe("10.60");
+  });
+
+  it("uses unknown for an unsupported GST jurisdiction", () => {
+    const result = validateInvoice({
+      columns: [{ id: "description", header: "ITEM" }],
+      rows: [{ rowNumber: 1, values: ["Medicine"], confidence: 0.9, warnings: [] }],
+      summaryRows: [],
+      warnings: [],
+      unresolvedText: [],
+      gstJurisdiction: "guessed",
+    });
+
+    expect(result.gstJurisdiction).toBe("unknown");
   });
 
   it("derives an id from the printed heading when Gemini leaves id blank", () => {
