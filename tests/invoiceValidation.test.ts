@@ -44,7 +44,8 @@ describe("invoice normalization", () => {
       ],
     });
 
-    expect(normalized.columns.map((column) => column.id)).toEqual(["amount", "amount_2", "batch_no"]);
+    expect(normalized.columns.map((column) => column.id)).toEqual(["amount", "amount_2", "column_3"]);
+    expect(normalized.columns[2].header).toBe("Batch No.");
     expect(normalized.rows[0].rowNumber).toBe(1);
     expect(normalized.rows[0].values).toEqual(["10.00", null, null]);
     expect(normalized.rows[0].confidence).toBe(1);
