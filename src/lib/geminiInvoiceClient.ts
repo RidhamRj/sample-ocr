@@ -24,14 +24,17 @@ export async function analyzeInvoice(input: AnalyzeInvoiceInput): Promise<Gemini
     signal: input.signal,
   });
 
-  const payload = (await response.json().catch(() => null)) as
-    | (GeminiInvoiceJson & { error?: never })
-    | { error?: string }
-    | null;
+  const payload: unknown = await response.json().catch(() => null);
+  const errorMessage =
+    payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+      ? payload.error
+      : null;
 
   if (!response.ok) {
-    throw new Error(payload && "error" in payload && payload.error ? payload.error : `Gemini request failed with HTTP ${response.status}.`);
+    throw new Error(errorMessage || `Gemini request failed with HTTP ${response.status}.`);
   }
-  if (!payload || "error" in payload) throw new Error("The server returned an invalid Gemini response.");
-  return payload;
+  if (!payload || typeof payload !== "object" || errorMessage) {
+    throw new Error("The server returned an invalid Gemini response.");
+  }
+  return payload as GeminiInvoiceJson;
 }
