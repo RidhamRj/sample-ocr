@@ -1,0 +1,28 @@
+name: package manual Vercel preview
+
+on:
+  push:
+    branches:
+      - agents/image-to-excel-cell-reconstruction-v1
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create deployment source archive
+        run: |
+          tar -czf sample-ocr-vercel-source.tar.gz \
+            package.json \
+            tsconfig.json tsconfig.app.json tsconfig.node.json \
+            vite.config.ts index.html vercel.json runtime.txt requirements.txt \
+            api src public scripts .nvmrc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sample-ocr-vercel-source
+          path: sample-ocr-vercel-source.tar.gz
+          retention-days: 1
