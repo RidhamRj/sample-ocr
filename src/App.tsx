@@ -1,13 +1,35 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { exportGeminiWorkbook } from "./lib/exportGeminiWorkbook";
-import { analyzeInvoice } from "./lib/geminiInvoiceClient";
+import { analyzeInvoice, getGeminiServiceStatus } from "./lib/geminiInvoiceClient";
+import { normalizeInvoice, validateInvoice } from "./lib/invoiceValidation";
 import { prepareInvoiceImage } from "./lib/prepareInvoiceImage";
-import type { GeminiInvoiceJson, PreparedInvoiceImage } from "./types/invoice";
+import type {
+  GeminiInvoiceJson,
+  GeminiServiceStatus,
+  PreparedInvoiceImage,
+  SummaryKind,
+} from "./types/invoice";
 
 const MODELS = [
-  { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash — stable default" },
-  { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash — newer model" },
+  { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash — free-tier stable default" },
+  { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash — stronger visual reasoning" },
   { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite — quota-friendly" },
+];
+
+const SUMMARY_KINDS: SummaryKind[] = [
+  "subtotal",
+  "taxable_amount",
+  "discount",
+  "cgst",
+  "sgst",
+  "igst",
+  "cess",
+  "freight",
+  "handling",
+  "credit_adjustment",
+  "debit_adjustment",
+  "round_off",
+  "other",
 ];
 
 const DEMO_RESULT: GeminiInvoiceJson = {
@@ -42,23 +64,9 @@ const DEMO_RESULT: GeminiInvoiceJson = {
 
 const bytesLabel = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 
-function normalizeResult(result: GeminiInvoiceJson): GeminiInvoiceJson {
-  const columnCount = result.columns.length;
-  return {
-    ...result,
-    rows: result.rows.map((row, index) => ({
-      ...row,
-      rowNumber: row.rowNumber || index + 1,
-      values: Array.from({ length: columnCount }, (_, columnIndex) => row.values[columnIndex] ?? null),
-      warnings: Array.isArray(row.warnings) ? row.warnings : [],
-    })),
-    summaryRows: Array.isArray(result.summaryRows) ? result.summaryRows : [],
-    unresolvedText: Array.isArray(result.unresolvedText) ? result.unresolvedText : [],
-    warnings: Array.isArray(result.warnings) ? result.warnings : [],
-  };
-}
-
 export default function App() {
+  const [serviceStatus, setServiceStatus] = useState<GeminiServiceStatus | null>(null);
+  const [serviceError, setServiceError] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState(() => sessionStorage.getItem("sample-ocr-gemini-key") ?? "");
   const [rememberKey, setRememberKey] = useState(() => Boolean(sessionStorage.getItem("sample-ocr-gemini-key")));
   const [model, setModel] = useState("gemini-2.5-flash");
@@ -66,20 +74,41 @@ export default function App() {
   const [prepared, setPrepared] = useState<PreparedInvoiceImage | null>(null);
   const [ocrEvidence, setOcrEvidence] = useState("");
   const [result, setResult] = useState<GeminiInvoiceJson | null>(null);
-  const [status, setStatus] = useState("Choose an invoice image and enter a Gemini API key.");
+  const [status, setStatus] = useState("Checking the Gemini extraction service…");
   const [processing, setProcessing] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"table" | "json" | "review">("table");
   const abortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
-  useEffect(() => () => { if (prepared?.previewUrl) URL.revokeObjectURL(prepared.previewUrl); }, [prepared?.previewUrl]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void getGeminiServiceStatus(controller.signal)
+      .then((nextStatus) => {
+        setServiceStatus(nextStatus);
+        setServiceError(null);
+        setStatus(nextStatus.serverKeyConfigured
+          ? "Server Gemini key detected. Choose an invoice image."
+          : "Choose an invoice image and paste a free Gemini API key.");
+      })
+      .catch((caught) => {
+        setServiceError(caught instanceof Error ? caught.message : String(caught));
+        setStatus("The Gemini service could not be verified.");
+      });
+    return () => controller.abort();
+  }, []);
 
-  const reviewCount = useMemo(() => {
-    if (!result) return 0;
-    return result.warnings.length + result.unresolvedText.length + result.rows.reduce((sum, row) => sum + row.warnings.length, 0) + (result.finalAmount ? 0 : 1);
-  }, [result]);
+  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => () => {
+    if (prepared?.previewUrl) URL.revokeObjectURL(prepared.previewUrl);
+  }, [prepared?.previewUrl]);
+
+  const validationIssues = useMemo(() => result ? validateInvoice(result) : [], [result]);
+  const errorCount = validationIssues.filter((issue) => issue.severity === "error").length;
+  const warningCount = validationIssues.filter((issue) => issue.severity === "warning").length;
+  const serverKeyConfigured = Boolean(serviceStatus?.serverKeyConfigured);
+  const userKeyAllowed = serviceStatus?.allowsUserKey !== false;
+  const keyReady = serverKeyConfigured || (userKeyAllowed && apiKey.trim().length >= 20);
 
   const chooseFile = async (next: File | null) => {
     if (prepared?.previewUrl) URL.revokeObjectURL(prepared.previewUrl);
@@ -88,11 +117,11 @@ export default function App() {
     setResult(null);
     setError(null);
     if (!next) {
-      setStatus("Choose an invoice image and enter a Gemini API key.");
+      setStatus(serverKeyConfigured ? "Choose an invoice image." : "Choose an invoice image and paste a Gemini API key.");
       return;
     }
     try {
-      setStatus("Preparing a readable image within Vercel's upload limit…");
+      setStatus("Preparing a readable image within Vercel's request limit…");
       const image = await prepareInvoiceImage(next);
       setPrepared(image);
       setStatus("Ready for Gemini table extraction.");
@@ -104,21 +133,30 @@ export default function App() {
 
   const runExtraction = async () => {
     if (!file || !prepared || processing) return;
-    if (!apiKey.trim()) {
-      setError("Paste your Gemini API key first.");
+    if (!keyReady) {
+      setError(userKeyAllowed
+        ? "Paste a valid Gemini API key first."
+        : "No server Gemini key is configured and user-provided keys are disabled.");
       return;
     }
-    if (rememberKey) sessionStorage.setItem("sample-ocr-gemini-key", apiKey.trim());
-    else sessionStorage.removeItem("sample-ocr-gemini-key");
+
+    if (!serverKeyConfigured && rememberKey) sessionStorage.setItem("sample-ocr-gemini-key", apiKey.trim());
+    else if (!rememberKey) sessionStorage.removeItem("sample-ocr-gemini-key");
 
     const controller = new AbortController();
     abortRef.current = controller;
     setProcessing(true);
     setResult(null);
     setError(null);
-    setStatus("Gemini is identifying printed columns, product rows, taxes, and the final amount…");
+    setStatus("Gemini is identifying printed columns, item rows, taxes, and the final amount…");
     try {
-      const invoice = normalizeResult(await analyzeInvoice({ apiKey, model, image: prepared, ocrEvidence, signal: controller.signal }));
+      const invoice = normalizeInvoice(await analyzeInvoice({
+        apiKey: serverKeyConfigured ? undefined : apiKey,
+        model,
+        image: prepared,
+        ocrEvidence,
+        signal: controller.signal,
+      }));
       setResult(invoice);
       setActiveTab("table");
       setStatus(`Extracted ${invoice.rows.length} rows and ${invoice.columns.length} columns in ${(invoice.processingTimeMs / 1000).toFixed(1)} seconds.`);
@@ -139,21 +177,66 @@ export default function App() {
     setStatus("Request cancelled.");
   };
 
+  const updateColumnHeader = (columnIndex: number, value: string) => {
+    setResult((current) => current ? normalizeInvoice({
+      ...current,
+      columns: current.columns.map((column, index) => index === columnIndex ? { ...column, header: value } : column),
+    }) : current);
+  };
+
   const updateCell = (rowIndex: number, columnIndex: number, value: string) => {
-    setResult((current) => current ? {
+    setResult((current) => current ? normalizeInvoice({
       ...current,
       rows: current.rows.map((row, index) => index !== rowIndex ? row : {
         ...row,
         values: row.values.map((cell, cellIndex) => cellIndex === columnIndex ? value : cell),
       }),
-    } : current);
+    }) : current);
   };
 
-  const updateSummary = (index: number, field: "label" | "amount", value: string) => {
-    setResult((current) => current ? {
+  const addRow = () => {
+    setResult((current) => current ? normalizeInvoice({
+      ...current,
+      rows: [
+        ...current.rows,
+        {
+          rowNumber: current.rows.length + 1,
+          values: Array.from({ length: current.columns.length }, () => null),
+          confidence: null,
+          warnings: ["Row added manually."],
+        },
+      ],
+    }) : current);
+  };
+
+  const deleteRow = (rowIndex: number) => {
+    setResult((current) => current ? normalizeInvoice({
+      ...current,
+      rows: current.rows
+        .filter((_, index) => index !== rowIndex)
+        .map((row, index) => ({ ...row, rowNumber: index + 1 })),
+    }) : current);
+  };
+
+  const updateSummary = (index: number, field: "label" | "amount" | "kind", value: string) => {
+    setResult((current) => current ? normalizeInvoice({
       ...current,
       summaryRows: current.summaryRows.map((row, rowIndex) => rowIndex !== index ? row : { ...row, [field]: value }),
-    } : current);
+    }) : current);
+  };
+
+  const addSummary = () => {
+    setResult((current) => current ? normalizeInvoice({
+      ...current,
+      summaryRows: [...current.summaryRows, { label: "", amount: null, kind: "other" }],
+    }) : current);
+  };
+
+  const deleteSummary = (index: number) => {
+    setResult((current) => current ? normalizeInvoice({
+      ...current,
+      summaryRows: current.summaryRows.filter((_, rowIndex) => rowIndex !== index),
+    }) : current);
   };
 
   const downloadExcel = async () => {
@@ -173,41 +256,49 @@ export default function App() {
     <main className="app-shell">
       <header className="hero">
         <div>
-          <span className="eyebrow">Gemini vision → strict JSON → Excel</span>
+          <span className="eyebrow">Gemini vision → strict JSON → editable Excel</span>
           <h1>Invoice table extractor</h1>
-          <p>Gemini reads the invoice layout, detects the printed column headings and product rows, preserves tax lines, and returns JSON. Excel is generated locally from the editable JSON.</p>
+          <p>Gemini reads the invoice layout, detects printed column headings and item rows, preserves all tax and total lines, and returns strict JSON. The workbook is generated locally from the reviewed JSON.</p>
         </div>
-        <div className="privacy-badge">No database · key used per request</div>
+        <div className="privacy-badge">No database · no GPU · key never committed</div>
       </header>
+
+      {serviceError && <div className="error-banner">Service check: {serviceError}</div>}
 
       <section className="control-grid">
         <article className="panel setup-panel">
-          <div className="panel-heading"><span className="step">1</span><div><h2>Gemini access</h2><p>Use a key from Google AI Studio. It is never committed or stored on the server.</p></div></div>
-          <label className="field-label" htmlFor="api-key">Gemini API key</label>
-          <input id="api-key" className="text-input" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="AIza…" autoComplete="off" />
-          <label className="remember-row"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} /> Remember only for this browser tab</label>
+          <div className="panel-heading"><span className="step">1</span><div><h2>Gemini access</h2><p>Use the free Google AI Studio key for this test app, or configure a server key on Vercel.</p></div></div>
+          {serverKeyConfigured ? (
+            <div className="server-key-note"><strong>Server key configured</strong><span>The browser does not need to receive or store the key.</span></div>
+          ) : (
+            <>
+              <label className="field-label" htmlFor="api-key">Gemini API key</label>
+              <input id="api-key" className="text-input" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="AIza…" autoComplete="off" disabled={!userKeyAllowed} />
+              <label className="remember-row"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} disabled={!userKeyAllowed} /> Remember only for this browser tab</label>
+            </>
+          )}
           <label className="field-label" htmlFor="model">Model</label>
           <select id="model" className="text-input" value={model} onChange={(event) => setModel(event.target.value)}>{MODELS.map((entry) => <option key={entry.value} value={entry.value}>{entry.label}</option>)}</select>
         </article>
 
         <article className="panel upload-panel">
-          <div className="panel-heading"><span className="step">2</span><div><h2>Invoice image</h2><p>Use a clear, straight photo. Small item rows need readable pixels.</p></div></div>
-          <label className="drop-zone"><input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void chooseFile(event.target.files?.[0] ?? null)} /><strong>{file?.name ?? "Choose JPG, PNG, or WebP"}</strong><span>{file ? bytesLabel(file.size) : "The browser compresses the request below 2.65 MB."}</span></label>
+          <div className="panel-heading"><span className="step">2</span><div><h2>Invoice image</h2><p>Use a clear, straight photo. Small batch, expiry, and GST text need readable pixels.</p></div></div>
+          <label className="drop-zone"><input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void chooseFile(event.target.files?.[0] ?? null)} /><strong>{file?.name ?? "Choose JPG, PNG, or WebP"}</strong><span>{file ? bytesLabel(file.size) : "The browser compresses the request below the Vercel body limit."}</span></label>
           {prepared && <div className="image-meta"><img src={prepared.previewUrl} alt="Prepared invoice preview" /><div><strong>{prepared.processedWidth} × {prepared.processedHeight}</strong><span>{bytesLabel(prepared.processedBytes)} sent to Gemini</span>{prepared.warnings.map((warning) => <small key={warning}>{warning}</small>)}</div></div>}
         </article>
       </section>
 
       <section className="panel evidence-panel">
-        <div className="panel-heading"><span className="step">3</span><div><h2>Optional OCR evidence</h2><p>Paste existing PharmaCare OCR text here. Gemini will use it as evidence, not as unquestioned truth.</p></div></div>
+        <div className="panel-heading"><span className="step">3</span><div><h2>Optional OCR evidence</h2><p>Paste PharmaCare OCR text or text boxes here. Gemini uses it as evidence, not as unquestioned truth.</p></div></div>
         <textarea className="ocr-input" value={ocrEvidence} onChange={(event) => setOcrEvidence(event.target.value)} placeholder="Optional: paste flat OCR text or OCR boxes here…" />
       </section>
 
       <section className="run-bar">
-        <div><strong>{status}</strong><span>The model must return null for unreadable values instead of inventing them.</span></div>
+        <div><strong>{status}</strong><span>Unreadable values must remain null rather than being guessed.</span></div>
         <div className="actions">
-          <button className="ghost-button" onClick={() => { setResult(DEMO_RESULT); setFile(new File(["demo"], "demo-invoice.jpg", { type: "image/jpeg" })); setActiveTab("table"); setStatus("Loaded demo JSON to test editing and Excel download."); }}>Load demo</button>
+          <button className="ghost-button" onClick={() => { setResult(normalizeInvoice(DEMO_RESULT)); setFile(new File(["demo"], "demo-invoice.jpg", { type: "image/jpeg" })); setActiveTab("table"); setStatus("Loaded demo JSON to test editing and Excel download."); }}>Load demo</button>
           {processing && <button className="ghost-button" onClick={cancel}>Cancel</button>}
-          <button className="primary-button" disabled={!prepared || !apiKey.trim() || processing} onClick={() => void runExtraction()}>{processing ? "Analysing invoice…" : "Extract table with Gemini"}</button>
+          <button className="primary-button" disabled={!prepared || !keyReady || processing} onClick={() => void runExtraction()}>{processing ? "Analysing invoice…" : "Extract table with Gemini"}</button>
         </div>
       </section>
 
@@ -215,22 +306,38 @@ export default function App() {
 
       {result && <section className="results-shell">
         <div className="results-toolbar">
-          <div className="stats"><span><strong>{result.columns.length}</strong> columns</span><span><strong>{result.rows.length}</strong> rows</span><span><strong>{result.summaryRows.length}</strong> summary lines</span><span className={reviewCount ? "warning-stat" : "ok-stat"}><strong>{reviewCount}</strong> review flags</span></div>
-          <div className="toolbar-actions"><div className="tabs"><button className={activeTab === "table" ? "active" : ""} onClick={() => setActiveTab("table")}>Table</button><button className={activeTab === "review" ? "active" : ""} onClick={() => setActiveTab("review")}>Review</button><button className={activeTab === "json" ? "active" : ""} onClick={() => setActiveTab("json")}>JSON</button></div><button className="primary-button" disabled={exporting} onClick={() => void downloadExcel()}>{exporting ? "Building Excel…" : "Download Excel"}</button></div>
+          <div className="stats">
+            <span><strong>{result.columns.length}</strong> columns</span>
+            <span><strong>{result.rows.length}</strong> rows</span>
+            <span><strong>{result.summaryRows.length}</strong> totals/taxes</span>
+            <span className={errorCount ? "error-stat" : "ok-stat"}><strong>{errorCount}</strong> blocking</span>
+            <span className={warningCount ? "warning-stat" : "ok-stat"}><strong>{warningCount}</strong> warnings</span>
+          </div>
+          <div className="toolbar-actions"><div className="tabs"><button className={activeTab === "table" ? "active" : ""} onClick={() => setActiveTab("table")}>Table</button><button className={activeTab === "review" ? "active" : ""} onClick={() => setActiveTab("review")}>Review</button><button className={activeTab === "json" ? "active" : ""} onClick={() => setActiveTab("json")}>JSON</button></div><button className="primary-button" disabled={exporting} onClick={() => void downloadExcel()}>{exporting ? "Building Excel…" : errorCount ? "Download with warnings" : "Download Excel"}</button></div>
         </div>
 
         {activeTab === "table" && <div className="table-layout">
           {prepared && <aside className="source-preview"><h3>Source image</h3><img src={prepared.previewUrl} alt="Invoice source" /></aside>}
-          <div className="table-card"><div className="table-scroll"><table><thead><tr><th className="row-index">#</th>{result.columns.map((column) => <th key={column.id}>{column.header}</th>)}</tr></thead><tbody>{result.rows.map((row, rowIndex) => <tr key={`${row.rowNumber}-${rowIndex}`}><td className="row-index">{row.rowNumber}</td>{result.columns.map((column, columnIndex) => <td key={column.id}><textarea value={row.values[columnIndex] ?? ""} onChange={(event) => updateCell(rowIndex, columnIndex, event.target.value)} aria-label={`Row ${row.rowNumber} ${column.header}`} /></td>)}</tr>)}</tbody></table></div>
-            <div className="summary-editor">{result.summaryRows.map((summary, index) => <div className="summary-line" key={`${summary.kind}-${index}`}><span className="kind-pill">{summary.kind.replaceAll("_", " ")}</span><input value={summary.label} onChange={(event) => updateSummary(index, "label", event.target.value)} /><input value={summary.amount ?? ""} onChange={(event) => updateSummary(index, "amount", event.target.value)} /></div>)}<div className="summary-line final-line"><strong>Final amount</strong><span /><input value={result.finalAmount ?? ""} onChange={(event) => setResult((current) => current ? { ...current, finalAmount: event.target.value } : current)} /></div></div>
+          <div className="table-card">
+            <div className="table-actions"><button className="ghost-button" onClick={addRow}>Add missing row</button><span>Edit headings and cells before downloading.</span></div>
+            <div className="table-scroll"><table><thead><tr><th className="row-index">#</th>{result.columns.map((column, columnIndex) => <th key={column.id}><input className="column-header-input" value={column.header} onChange={(event) => updateColumnHeader(columnIndex, event.target.value)} aria-label={`Column ${columnIndex + 1} heading`} /></th>)}<th className="row-action-header">Action</th></tr></thead><tbody>{result.rows.map((row, rowIndex) => <tr key={`${row.rowNumber}-${rowIndex}`}><td className="row-index">{row.rowNumber}</td>{result.columns.map((column, columnIndex) => <td key={column.id}><textarea value={row.values[columnIndex] ?? ""} onChange={(event) => updateCell(rowIndex, columnIndex, event.target.value)} aria-label={`Row ${row.rowNumber} ${column.header}`} /></td>)}<td className="row-action-cell"><button className="danger-button" onClick={() => deleteRow(rowIndex)} aria-label={`Delete row ${row.rowNumber}`}>Delete</button></td></tr>)}</tbody></table></div>
+            <div className="summary-editor">
+              <div className="summary-toolbar"><h3>Taxes, totals, and adjustments</h3><button className="ghost-button" onClick={addSummary}>Add summary line</button></div>
+              {result.summaryRows.map((summary, index) => <div className="summary-line" key={`${summary.kind}-${index}`}><select value={summary.kind} onChange={(event) => updateSummary(index, "kind", event.target.value)}>{SUMMARY_KINDS.map((kind) => <option key={kind} value={kind}>{kind.replaceAll("_", " ")}</option>)}</select><input value={summary.label} onChange={(event) => updateSummary(index, "label", event.target.value)} placeholder="Printed label" /><input value={summary.amount ?? ""} onChange={(event) => updateSummary(index, "amount", event.target.value)} placeholder="Amount" /><button className="danger-button" onClick={() => deleteSummary(index)}>Delete</button></div>)}
+              <div className="summary-line final-line"><strong>Final amount</strong><span /><input value={result.finalAmount ?? ""} onChange={(event) => setResult((current) => current ? normalizeInvoice({ ...current, finalAmount: event.target.value }) : current)} /><span /></div>
+            </div>
           </div>
         </div>}
 
-        {activeTab === "review" && <div className="review-grid"><article><h3>Model warnings</h3>{result.warnings.length ? result.warnings.map((warning) => <p key={warning}>{warning}</p>) : <p className="muted">No model warnings.</p>}</article><article><h3>Unresolved text</h3>{result.unresolvedText.length ? result.unresolvedText.map((text) => <p key={text}>{text}</p>) : <p className="muted">No unresolved text.</p>}</article><article className="full-width"><h3>Row warnings</h3>{result.rows.some((row) => row.warnings.length) ? result.rows.flatMap((row) => row.warnings.map((warning) => <p key={`${row.rowNumber}-${warning}`}><strong>Row {row.rowNumber}:</strong> {warning}</p>)) : <p className="muted">No row-specific warnings.</p>}</article></div>}
+        {activeTab === "review" && <div className="review-grid">
+          <article className="full-width"><h3>Deterministic validation</h3>{validationIssues.length ? validationIssues.map((issue, index) => <p className={issue.severity === "error" ? "issue-error" : "issue-warning"} key={`${issue.scope}-${issue.rowNumber ?? "x"}-${index}`}><strong>{issue.severity.toUpperCase()} · {issue.scope}{issue.rowNumber ? ` · row ${issue.rowNumber}` : ""}</strong><br />{issue.message}</p>) : <p className="muted">No deterministic issues found. Visual comparison with the invoice is still required.</p>}</article>
+          <article><h3>Model warnings</h3>{result.warnings.length ? result.warnings.map((warning) => <p key={warning}>{warning}</p>) : <p className="muted">No model warnings.</p>}</article>
+          <article><h3>Unresolved text</h3>{result.unresolvedText.length ? result.unresolvedText.map((text) => <p key={text}>{text}</p>) : <p className="muted">No unresolved text.</p>}</article>
+        </div>}
         {activeTab === "json" && <pre className="json-view">{JSON.stringify(result, null, 2)}</pre>}
       </section>}
 
-      <footer><strong>Important:</strong> This is an extraction assistant. Verify batch, expiry, quantity, rate, taxes, and final amount before importing anything into pharmacy inventory.</footer>
+      <footer><strong>Important:</strong> This is an extraction assistant. Verify batch, expiry, quantity, rate, taxes, and final amount before importing anything into pharmacy inventory. Free-tier invoice content may be processed under Google's free-tier data terms.</footer>
     </main>
   );
 }
