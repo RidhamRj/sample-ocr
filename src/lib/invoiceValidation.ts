@@ -1,5 +1,6 @@
 import type {
   GeminiInvoiceJson,
+  GstJurisdiction,
   InvoiceColumn,
   InvoiceSummaryRow,
   InvoiceValidationIssue,
@@ -23,6 +24,13 @@ const SUMMARY_KINDS = new Set<SummaryKind>([
   "other",
 ]);
 
+const GST_JURISDICTIONS = new Set<GstJurisdiction>([
+  "intrastate",
+  "interstate",
+  "not_applicable",
+  "unknown",
+]);
+
 const NUMERIC_COLUMN_PATTERN = /(^|_)(qty|quantity|free|mrp|rate|price|discount|disc|gst|tax|amount|value|total)(_|$)/i;
 
 function asNullableString(value: unknown): string | null {
@@ -38,6 +46,11 @@ function asStringArray(value: unknown): string[] {
 function clampConfidence(value: unknown): number | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   return Math.max(0, Math.min(1, value));
+}
+
+function asGstJurisdiction(value: unknown): GstJurisdiction {
+  const normalized = String(value ?? "unknown") as GstJurisdiction;
+  return GST_JURISDICTIONS.has(normalized) ? normalized : "unknown";
 }
 
 export function normalizeColumnId(value: string, fallback: string): string {
@@ -99,6 +112,10 @@ export function normalizeInvoice(invoice: GeminiInvoiceJson): GeminiInvoiceJson 
 
   return {
     documentType: String(invoice.documentType ?? "Invoice").trim() || "Invoice",
+    supplierName: asNullableString(invoice.supplierName),
+    invoiceNumber: asNullableString(invoice.invoiceNumber),
+    billDate: asNullableString(invoice.billDate),
+    gstJurisdiction: asGstJurisdiction(invoice.gstJurisdiction),
     tableTitle: asNullableString(invoice.tableTitle),
     currency: asNullableString(invoice.currency),
     columns,
@@ -137,6 +154,19 @@ export function parsePrintedNumber(value: string | null): number | null {
 
 export function validateInvoice(invoice: GeminiInvoiceJson): InvoiceValidationIssue[] {
   const issues: InvoiceValidationIssue[] = [];
+
+  if (!invoice.supplierName) {
+    issues.push({ severity: "warning", scope: "document", message: "The supplier name is missing." });
+  }
+  if (!invoice.invoiceNumber) {
+    issues.push({ severity: "warning", scope: "document", message: "The invoice number is missing." });
+  }
+  if (!invoice.billDate) {
+    issues.push({ severity: "warning", scope: "document", message: "The bill date is missing." });
+  }
+  if (invoice.gstJurisdiction === "unknown") {
+    issues.push({ severity: "warning", scope: "document", message: "GST jurisdiction could not be determined confidently." });
+  }
 
   if (invoice.columns.length === 0) {
     issues.push({ severity: "error", scope: "document", message: "No product-table columns were detected." });
