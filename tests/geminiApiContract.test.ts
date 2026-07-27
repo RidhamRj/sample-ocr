@@ -1,11 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_MODEL,
+  SUPPORTED_MODELS,
   extractionPrompt,
   invoiceSchema,
+  resolveRequestedModel,
   validateInvoice,
 } from "../api/gemini-invoice.js";
 
 describe("Gemini API contract", () => {
+  it("uses current stable models and migrates retired selections", () => {
+    expect(DEFAULT_MODEL).toBe("gemini-3.5-flash");
+    expect(SUPPORTED_MODELS).toContain("gemini-3.5-flash");
+    expect(SUPPORTED_MODELS).not.toContain("gemini-2.5-flash");
+    expect(resolveRequestedModel("gemini-2.5-flash")).toBe("gemini-3.5-flash");
+    expect(resolveRequestedModel("gemini-2.5-flash-lite")).toBe("gemini-3.1-flash-lite");
+    expect(resolveRequestedModel("unknown-model")).toBe(DEFAULT_MODEL);
+  });
+
   it("uses structured nullable fields supported by Gemini", () => {
     const properties = invoiceSchema.properties as Record<string, { type?: string; nullable?: boolean }>;
     expect(properties.finalAmount.type).toBe("string");
@@ -41,6 +53,18 @@ describe("Gemini API contract", () => {
     expect(result.rows[0].values).toEqual(["10.00", null, null]);
     expect(result.summaryRows[0].kind).toBe("cgst");
     expect(result.finalAmount).toBe("10.60");
+  });
+
+  it("derives an id from the printed heading when Gemini leaves id blank", () => {
+    const result = validateInvoice({
+      columns: [{ id: "", header: "Batch No." }],
+      rows: [{ rowNumber: 1, values: ["B2401"], confidence: 0.9, warnings: [] }],
+      summaryRows: [],
+      warnings: [],
+      unresolvedText: [],
+    });
+
+    expect(result.columns[0].id).toBe("batch_no");
   });
 
   it("rejects responses without an item table", () => {
