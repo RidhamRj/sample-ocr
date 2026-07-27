@@ -1,0 +1,237 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OpenCV benchmark</title>
+</head>
+<body>
+<pre id="output">running</pre>
+<script>
+window.__BENCHMARK_RESULT__ = null;
+
+const names = ["borderless-invoice", "ruled-invoice", "skewed-invoice"];
+const median = (values) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+};
+const countAccuracy = (expected, actual) => expected === actual
+  ? 1
+  : Math.min(expected, actual) / Math.max(expected, actual, 1);
+const bounds = (box) => {
+  const xs = box.map((point) => point[0]);
+  const ys = box.map((point) => point[1]);
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    width: Math.max(...xs) - Math.min(...xs),
+    height: Math.max(...ys) - Math.min(...ys),
+  };
+};
+const cluster = (values, tolerance) => {
+  const groups = [];
+  for (const value of [...values].sort((a, b) => a - b)) {
+    const last = groups.at(-1);
+    if (!last || value - last.at(-1) > tolerance) groups.push([value]);
+    else last.push(value);
+  }
+  return groups.map((group) => group.reduce((sum, value) => sum + value, 0) / group.length);
+};
+
+function borderless(ocr, width, height) {
+  if (ocr.length < 9) return [];
+  const boxes = ocr.map((item) => bounds(item.box));
+  const heights = boxes.map((box) => box.height);
+  const widths = boxes.map((box) => box.width);
+  const rows = cluster(
+    boxes.map((box) => box.y + box.height / 2),
+    Math.max(8, median(heights) * 0.75),
+  );
+  const columns = cluster(
+    boxes.map((box) => box.x + box.width / 2),
+    Math.max(18, median(widths) * 0.7),
+  );
+  if (rows.length < 3 || columns.length < 3 || columns.length > 18) return [];
+  const rowBoundaries = [0, ...rows.slice(1).map((value, index) => (rows[index] + value) / 2), height];
+  const columnBoundaries = [0, ...columns.slice(1).map((value, index) => (columns[index] + value) / 2), width];
+  const cells = [];
+  for (let row = 0; row < rowBoundaries.length - 1; row += 1) {
+    for (let column = 0; column < columnBoundaries.length - 1; column += 1) {
+      cells.push({
+        id: `borderless-1-r${row}-c${column}`,
+        tableId: "borderless-1",
+        row,
+        column,
+        rowSpan: 1,
+        columnSpan: 1,
+        x: columnBoundaries[column],
+        y: rowBoundaries[row],
+        width: columnBoundaries[column + 1] - columnBoundaries[column],
+        height: rowBoundaries[row + 1] - rowBoundaries[row],
+      });
+    }
+  }
+  return cells;
+}
+
+function placement(ocr, cells) {
+  let scored = 0;
+  let correct = 0;
+  for (const item of ocr) {
+    if (item.expectedRow == null || item.expectedColumn == null) continue;
+    const box = bounds(item.box);
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    const cell = cells.find((candidate) => (
+      candidate.x <= x && x <= candidate.x + candidate.width
+      && candidate.y <= y && y <= candidate.y + candidate.height
+    ));
+    scored += 1;
+    if (cell && cell.row === item.expectedRow && cell.column === item.expectedColumn) correct += 1;
+  }
+  return scored ? correct / scored : null;
+}
+
+const worker = new Worker("/opencv-worker.js");
+function workerRun(bitmap) {
+  return new Promise((resolve, reject) => {
+    const requestId = crypto.randomUUID();
+    const started = performance.now();
+    const cleanup = () => {
+      worker.removeEventListener("message", onMessage);
+      worker.removeEventListener("error", onError);
+    };
+    const onError = (event) => {
+      cleanup();
+      reject(new Error(event.message || "OpenCV worker failed"));
+    };
+    const onMessage = (event) => {
+      const message = event.data;
+      if (message.requestId !== requestId) return;
+      if (message.type === "error") {
+        cleanup();
+        reject(new Error(message.error));
+      }
+      if (message.type === "result") {
+        cleanup();
+        resolve({ result: message.result, ms: performance.now() - started });
+      }
+    };
+    worker.addEventListener("message", onMessage);
+    worker.addEventListener("error", onError);
+    worker.postMessage({
+      type: "analyze",
+      requestId,
+      imageBitmap: bitmap,
+      opencvUrl: "/vendor/opencv.js",
+    }, [bitmap]);
+  });
+}
+
+(async () => {
+  const cases = [];
+  let maxLag = 0;
+  let last = performance.now();
+  const timer = setInterval(() => {
+    const now = performance.now();
+    maxLag = Math.max(maxLag, now - last - 25);
+    last = now;
+  }, 25);
+  const heapBefore = performance.memory?.usedJSHeapSize ?? null;
+  let globalRunIndex = 0;
+  try {
+    for (const name of names) {
+      const [blob, expected] = await Promise.all([
+        fetch(`/benchmark-fixtures/${name}.png`).then((response) => response.blob()),
+        fetch(`/benchmark-fixtures/${name}.json`).then((response) => response.json()),
+      ]);
+      const includesColdStart = globalRunIndex === 0;
+      const runCount = includesColdStart ? 2 : 1;
+      const runs = [];
+      let geometry;
+      for (let index = 0; index < runCount; index += 1) {
+        const bitmap = await createImageBitmap(blob);
+        const measured = await workerRun(bitmap);
+        runs.push(measured.ms);
+        geometry = measured.result;
+        globalRunIndex += 1;
+      }
+      let cells = geometry.cell_rectangles;
+      if (!cells.length && expected.ocrBoxes?.length) {
+        cells = borderless(
+          expected.ocrBoxes,
+          geometry.page_transform.targetWidth,
+          geometry.page_transform.targetHeight,
+        );
+      }
+      const rows = Math.max(0, ...cells.map((cell) => cell.row + (cell.rowSpan || 1)));
+      const columns = Math.max(0, ...cells.map((cell) => cell.column + (cell.columnSpan || 1)));
+      const cellPlacement = placement(expected.ocrBoxes || [], cells);
+      const warmProcessingMs = includesColdStart ? runs[1] : runs[0];
+      cases.push({
+        fixture: `${name}.png`,
+        kind: expected.kind,
+        imageBytes: blob.size,
+        includesColdStart,
+        coldOrFirstRunMs: Number(runs[0].toFixed(2)),
+        warmProcessingMs: Number(warmProcessingMs.toFixed(2)),
+        rowAccuracy: Number(countAccuracy(expected.rows, rows).toFixed(4)),
+        columnAccuracy: Number(countAccuracy(expected.columns, columns).toFixed(4)),
+        cellCountAccuracy: Number(countAccuracy(expected.cellCount, cells.length).toFixed(4)),
+        cellPlacementAccuracy: cellPlacement == null ? null : Number(cellPlacement.toFixed(4)),
+        blankCellAccuracy: cells.length === expected.cellCount
+          ? 1
+          : Number(countAccuracy(expected.cellCount, cells.length).toFixed(4)),
+        detectedRows: rows,
+        detectedColumns: columns,
+        detectedCells: cells.length,
+        diagnostics: geometry.diagnostics,
+      });
+    }
+    clearInterval(timer);
+    const placements = cases
+      .map((item) => item.cellPlacementAccuracy)
+      .filter((value) => value != null);
+    const acceptance = {
+      structureAccuracyPassed: cases.every((item) => (
+        item.rowAccuracy >= 0.9
+        && item.columnAccuracy >= 0.9
+        && item.cellCountAccuracy >= 0.9
+      )),
+      blankCellsPassed: cases.every((item) => item.blankCellAccuracy === 1),
+      placementPassed: placements.every((value) => value >= 0.95),
+      responsivenessPassed: maxLag < 150,
+    };
+    const result = {
+      candidate: "A - Browser OpenCV.js geometry plus Vercel OCR",
+      workerReuse: "one persistent worker and one lazy OpenCV instance",
+      totalGeometryPasses: globalRunIndex,
+      cases,
+      summary: {
+        coldInitializationAndFirstRunMs: cases[0]?.coldOrFirstRunMs ?? null,
+        medianWarmMs: Number(median(cases.map((item) => item.warmProcessingMs)).toFixed(2)),
+        meanRowAccuracy: Number((cases.reduce((sum, item) => sum + item.rowAccuracy, 0) / cases.length).toFixed(4)),
+        meanColumnAccuracy: Number((cases.reduce((sum, item) => sum + item.columnAccuracy, 0) / cases.length).toFixed(4)),
+        meanCellCountAccuracy: Number((cases.reduce((sum, item) => sum + item.cellCountAccuracy, 0) / cases.length).toFixed(4)),
+        meanCellPlacementAccuracy: placements.length
+          ? Number((placements.reduce((sum, value) => sum + value, 0) / placements.length).toFixed(4))
+          : null,
+        meanBlankCellAccuracy: Number((cases.reduce((sum, item) => sum + item.blankCellAccuracy, 0) / cases.length).toFixed(4)),
+        maxMainThreadLagMs: Number(maxLag.toFixed(2)),
+        heapDeltaBytes: heapBefore == null ? null : performance.memory.usedJSHeapSize - heapBefore,
+      },
+      acceptance,
+    };
+    window.__BENCHMARK_RESULT__ = result;
+    document.getElementById("output").textContent = JSON.stringify(result, null, 2);
+  } catch (error) {
+    clearInterval(timer);
+    window.__BENCHMARK_RESULT__ = { error: error instanceof Error ? error.message : String(error) };
+    document.getElementById("output").textContent = JSON.stringify(window.__BENCHMARK_RESULT__, null, 2);
+  } finally {
+    worker.terminate();
+  }
+})();
+</script>
+</body>
+</html>

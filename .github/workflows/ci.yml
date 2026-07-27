@@ -1,0 +1,190 @@
+name: image-to-excel validation
+
+on:
+  push:
+    branches:
+      - main
+      - agents/image-to-excel-cell-reconstruction-v1
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-and-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install frontend dependencies
+        run: npm install --no-audit --no-fund
+      - name: Generate locked benchmark fixtures
+        run: |
+          python3 -m pip install --disable-pip-version-check Pillow==11.1.0
+          npm run benchmark:fixtures
+      - name: Download official OpenCV.js
+        run: npm run prepare:opencv
+      - name: Unit-test fusion and XLSX
+        run: npm test
+      - name: Build static frontend
+        run: npm run build
+      - name: Run browser OpenCV benchmark
+        id: browser-benchmark
+        continue-on-error: true
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+        run: npm run benchmark:browser
+      - name: Record static bundle measurements
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          files = [path for path in Path('dist').rglob('*') if path.is_file()]
+          payload = {
+              'distBytes': sum(path.stat().st_size for path in files),
+              'opencvJsBytes': Path('public/vendor/opencv.js').stat().st_size,
+              'largestStaticFiles': sorted(
+                  ({'path': str(path), 'bytes': path.stat().st_size} for path in files),
+                  key=lambda item: item['bytes'], reverse=True,
+              )[:10],
+          }
+          Path('benchmarks/results').mkdir(parents=True, exist_ok=True)
+          Path('benchmarks/results/static-bundle.json').write_text(json.dumps(payload, indent=2))
+          print(json.dumps(payload, indent=2))
+          PY
+      - name: Install LibreOffice when missing
+        if: always()
+        run: |
+          if ! command -v libreoffice >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libreoffice-calc
+          fi
+      - name: Verify XLSX with OpenPyXL and LibreOffice
+        if: always()
+        run: |
+          python3 -m pip install --disable-pip-version-check openpyxl==3.1.5
+          python3 scripts/verify_xlsx.py benchmarks/results/browser-export-compatibility.xlsx
+      - name: Upload frontend benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-browser-evidence
+          if-no-files-found: ignore
+          path: |
+            benchmarks/results/candidate-a.json
+            benchmarks/results/static-bundle.json
+            benchmarks/results/browser-export-compatibility.xlsx
+            benchmarks/results/browser-export-compatibility.compatibility.json
+            dist/
+      - name: Enforce browser benchmark gates
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path('benchmarks/results/candidate-a.json')
+          if not path.exists():
+              raise SystemExit('Candidate A evidence was not produced')
+          payload = json.loads(path.read_text())
+          if payload.get('error'):
+              raise SystemExit(f"Candidate A failed: {payload['error']}")
+          failed = [name for name, passed in payload.get('acceptance', {}).items() if passed is False]
+          if failed:
+              raise SystemExit(f"Candidate A acceptance gates failed: {', '.join(failed)}")
+          print('Candidate A acceptance gates passed')
+          PY
+
+  python-ocr-and-candidate-b:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install OCR runtime
+        run: pip install --disable-pip-version-check -r requirements-benchmark.txt
+      - name: Generate shared fixtures
+        run: python3 benchmarks/generate_fixtures.py
+      - name: Python OCR contract tests
+        run: python3 -m unittest discover -s tests -p 'test_ocr_core.py' -v
+      - name: Candidate B geometry tests
+        run: python3 -m unittest discover -s tests -p 'test_candidate_b_geometry.py' -v
+      - name: Candidate B benchmark
+        run: python3 benchmarks/run_python_benchmark.py
+      - name: RapidOCR self-test
+        run: |
+          python3 - <<'PY'
+          import asyncio
+          import json
+          from pathlib import Path
+          from api.ocr_core import self_test
+
+          result = asyncio.run(self_test(None))
+          if result['status'] != 'ok':
+              raise SystemExit(f"RapidOCR self-test failed: {result}")
+          Path('benchmarks/results').mkdir(parents=True, exist_ok=True)
+          Path('benchmarks/results/python-runtime.json').write_text(json.dumps({'selfTest': result}, indent=2))
+          print(json.dumps(result, indent=2))
+          PY
+      - name: Measure clean production Python bundle
+        run: |
+          rm -rf .production-python
+          python3 -m pip install --disable-pip-version-check --no-compile --target .production-python -r requirements.txt
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path('.production-python')
+          api_root = Path('api')
+          def size(path):
+              if path.is_file():
+                  return path.stat().st_size
+              return sum(item.stat().st_size for item in path.rglob('*') if item.is_file())
+
+          dependency_bytes = size(root)
+          api_bytes = size(api_root)
+          estimated_function_bytes = dependency_bytes + api_bytes
+          limit_bytes = 500 * 1024 * 1024
+          entries = sorted(
+              ({'path': item.name, 'bytes': size(item)} for item in root.iterdir()),
+              key=lambda item: item['bytes'],
+              reverse=True,
+          )[:20]
+          result_path = Path('benchmarks/results/python-runtime.json')
+          payload = json.loads(result_path.read_text())
+          payload['cleanProductionBundle'] = {
+              'dependencyBytes': dependency_bytes,
+              'apiBytes': api_bytes,
+              'estimatedFunctionBytes': estimated_function_bytes,
+              'vercelUncompressedLimitBytes': limit_bytes,
+              'fitsVercelLimit': estimated_function_bytes <= limit_bytes,
+              'largestEntries': entries,
+          }
+          result_path.write_text(json.dumps(payload, indent=2))
+          print(json.dumps(payload['cleanProductionBundle'], indent=2))
+          if estimated_function_bytes > limit_bytes:
+              raise SystemExit(
+                  f'Clean production bundle is {estimated_function_bytes} bytes, above the 500 MB Vercel limit'
+              )
+          PY
+          rm -rf .production-python
+      - name: Confirm production isolation
+        run: |
+          ! grep -R -n -E 'supplierInvoiceLayoutStrategy|inventory|database|migration' api src public/opencv-worker.js
+          ! grep -R -n -E 'from .*PharmacyCare|import .*PharmacyCare|PharmacyCare\.git' api src public scripts
+      - name: Upload Python benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-ocr-evidence
+          if-no-files-found: ignore
+          path: |
+            benchmarks/results/candidate-b.json
+            benchmarks/results/python-runtime.json
