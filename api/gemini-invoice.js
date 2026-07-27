@@ -33,10 +33,25 @@ const SUMMARY_KINDS = [
   "other",
 ];
 
+const GST_JURISDICTIONS = [
+  "intrastate",
+  "interstate",
+  "not_applicable",
+  "unknown",
+];
+
 export const invoiceSchema = {
   type: "object",
   properties: {
     documentType: { type: "string", description: "Printed document type such as Tax Invoice or Purchase Invoice." },
+    supplierName: { type: "string", nullable: true, description: "Exact printed legal or trade name of the supplier/vendor issuing the invoice, not the buyer/customer." },
+    invoiceNumber: { type: "string", nullable: true, description: "Exact printed invoice, bill, tax invoice, or document number." },
+    billDate: { type: "string", nullable: true, description: "Exact printed invoice or bill date. Preserve the printed format and do not invent a missing date." },
+    gstJurisdiction: {
+      type: "string",
+      enum: GST_JURISDICTIONS,
+      description: "intrastate for CGST+SGST or matching supplier/buyer GST state codes; interstate for IGST or different state codes; not_applicable when GST does not apply; unknown when evidence is insufficient or conflicting.",
+    },
     tableTitle: { type: "string", nullable: true, description: "Printed title of the main product table, when present." },
     currency: { type: "string", nullable: true, description: "Currency code or printed currency symbol, usually INR for Indian pharmacy invoices." },
     columns: {
@@ -89,6 +104,10 @@ export const invoiceSchema = {
   },
   required: [
     "documentType",
+    "supplierName",
+    "invoiceNumber",
+    "billDate",
+    "gstJurisdiction",
     "tableTitle",
     "currency",
     "columns",
@@ -103,26 +122,32 @@ export const invoiceSchema = {
 
 export const extractionPrompt = `You are converting a pharmacy supplier invoice image into strict JSON that will be used to create an Excel workbook.
 
+SUPPLIER AND INVOICE IDENTITY
+1. supplierName must be the exact printed legal or trade name of the supplier/vendor issuing the invoice. Do not return the buyer, customer, consignee, or pharmacy name.
+2. invoiceNumber must preserve the exact printed invoice, bill, tax invoice, or document number, including slashes, dashes, letters, and leading zeroes. Use null when it cannot be read.
+3. billDate must preserve the exact printed invoice or bill date. Do not silently convert or guess the date format. Use null when it cannot be read.
+4. gstJurisdiction must be one of: intrastate, interstate, not_applicable, unknown. Use intrastate when CGST and SGST are charged or supplier and buyer GST state codes clearly match. Use interstate when IGST is charged or the state codes clearly differ. Use not_applicable only when the document clearly indicates GST does not apply. Use unknown when the evidence is missing, ambiguous, or conflicting. Do not decide from an address alone when uncertain.
+
 MAIN ITEM TABLE
-1. Visually inspect the invoice and identify the actual printed item-table column headings from left to right.
-2. Include every printed item-table column, even serial number, pack, HSN, batch, expiry, quantity, free quantity, MRP, rate, discount, GST percentage, tax value, or amount columns.
-3. Return every product or item row in exactly the same order as printed.
-4. Each row values array MUST have exactly one value for every detected column and MUST follow the columns array order.
-5. Preserve printed text and decimal precision. Preserve product names, pack formats, batch numbers, expiry formats, quantities, rates, discounts, GST values, and amounts.
-6. Keep wrapped product descriptions in their original row. Never merge two distinct product rows and never repeat a row.
-7. Preserve genuinely blank cells as null. Never shift later values left when a printed cell is blank.
+5. Visually inspect the invoice and identify the actual printed item-table column headings from left to right.
+6. Include every printed item-table column, even serial number, pack, HSN, batch, expiry, quantity, free quantity, MRP, rate, discount, GST percentage, tax value, or amount columns.
+7. Return every product or item row in exactly the same order as printed.
+8. Each row values array MUST have exactly one value for every detected column and MUST follow the columns array order.
+9. Preserve printed text and decimal precision. Preserve product names, pack formats, batch numbers, expiry formats, quantities, rates, discounts, GST values, and amounts.
+10. Keep wrapped product descriptions in their original row. Never merge two distinct product rows and never repeat a row.
+11. Preserve genuinely blank cells as null. Never shift later values left when a printed cell is blank.
 
 TAXES, TOTALS, AND ADJUSTMENTS
-8. Extract every monetary summary line that affects the invoice total, including subtotal, taxable amount, trade/cash/scheme discount, CGST, SGST, IGST, cess, freight, handling, delivery, round-off, credit/debit adjustment, and other printed adjustments.
-9. Keep tax or HSN summary-table lines out of product rows. Include their monetary totals in summaryRows when they affect the invoice total.
-10. Preserve each printed summary label and amount. Do not calculate, repair, or invent a value merely to make totals match.
-11. finalAmount must contain the exact printed payable, net, grand-total, or invoice amount. Use null only when it truly cannot be read.
+12. Extract every monetary summary line that affects the invoice total, including subtotal, taxable amount, trade/cash/scheme discount, CGST, SGST, IGST, cess, freight, handling, delivery, round-off, credit/debit adjustment, and other printed adjustments.
+13. Keep tax or HSN summary-table lines out of product rows. Include their monetary totals in summaryRows when they affect the invoice total.
+14. Preserve each printed summary label and amount. Do not calculate, repair, or invent a value merely to make totals match.
+15. finalAmount must contain the exact printed payable, net, grand-total, or invoice amount. Use null only when it truly cannot be read.
 
 RELIABILITY RULES
-12. Ignore supplier address, phone, GSTIN, customer details, bank details, declarations, signatures, and unrelated prose.
-13. Never invent unreadable text or numbers. Use null and describe the uncertainty in warnings or unresolvedText.
-14. The image is the primary source. OCR evidence, when supplied, is supporting evidence only and may contain mistakes.
-15. Return only schema-conforming JSON. Do not return markdown or explanatory prose.`;
+16. Supplier and buyer GSTIN state codes may be used only to determine gstJurisdiction. Do not return GSTINs, supplier address, phone, customer details, bank details, declarations, signatures, or unrelated prose.
+17. Never invent unreadable text or numbers. Use null and describe the uncertainty in warnings or unresolvedText.
+18. The image is the primary source. OCR evidence, when supplied, is supporting evidence only and may contain mistakes.
+19. Return only schema-conforming JSON. Do not return markdown or explanatory prose.`;
 
 function sendJson(response, status, payload) {
   response.status(status);
@@ -161,6 +186,10 @@ function stringArray(value) {
 
 function confidence(value) {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : null;
+}
+
+function gstJurisdiction(value) {
+  return GST_JURISDICTIONS.includes(value) ? value : "unknown";
 }
 
 export function validateInvoice(rawInvoice) {
@@ -202,6 +231,10 @@ export function validateInvoice(rawInvoice) {
 
   return {
     documentType: String(rawInvoice.documentType ?? "Invoice").trim() || "Invoice",
+    supplierName: nullableString(rawInvoice.supplierName),
+    invoiceNumber: nullableString(rawInvoice.invoiceNumber),
+    billDate: nullableString(rawInvoice.billDate),
+    gstJurisdiction: gstJurisdiction(rawInvoice.gstJurisdiction),
     tableTitle: nullableString(rawInvoice.tableTitle),
     currency: nullableString(rawInvoice.currency),
     columns,
