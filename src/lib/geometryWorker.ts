@@ -30,7 +30,7 @@ class GeometryWorkerClient {
         const message = event.data; if (message.requestId !== requestId) return;
         if (message.type === "progress") {
           const stage = message.stage === "Loading OpenCV.js"
-            ? "Loading OpenCV.js — first run downloads about 11 MB"
+            ? "Loading OpenCV.js — first run downloads the browser engine"
             : message.stage ?? "geometry";
           onProgress?.({ stage, progress: message.progress ?? 0 });
           return;
@@ -48,7 +48,7 @@ class GeometryWorkerClient {
       worker.addEventListener("message", onMessage);
       worker.addEventListener("error", onError);
       worker.addEventListener("messageerror", onMessageError);
-      worker.postMessage({ type: "analyze", requestId, imageBitmap, opencvUrl: import.meta.env.VITE_OPENCV_URL || "/vendor/opencv.js?v=4.10.0" }, [imageBitmap]);
+      worker.postMessage({ type: "analyze", requestId, imageBitmap, opencvUrl: import.meta.env.VITE_OPENCV_URL || "/vendor/opencv.js?v=4.5.0" }, [imageBitmap]);
     });
   }
 }
