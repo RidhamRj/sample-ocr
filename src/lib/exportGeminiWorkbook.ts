@@ -1,5 +1,6 @@
 import ExcelJS from "exceljs";
-import type { GeminiInvoiceJson } from "../types/invoice";
+import { validateInvoice } from "./invoiceValidation";
+import type { GeminiInvoiceJson, InvoiceValidationIssue } from "../types/invoice";
 
 function safeFileName(value: string): string {
   return value.replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 70) || "invoice";
@@ -16,10 +17,53 @@ function downloadBlob(blob: Blob, fileName: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export async function exportGeminiWorkbook(invoice: GeminiInvoiceJson, sourceName: string): Promise<void> {
+function styleHeader(cell: ExcelJS.Cell): void {
+  cell.font = { bold: true, color: { argb: "FF17326D" } };
+  cell.alignment = { vertical: "middle", wrapText: true };
+  cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFDDE7FF" } };
+  cell.border = {
+    top: { style: "thin", color: { argb: "FFB8C7E8" } },
+    left: { style: "thin", color: { argb: "FFB8C7E8" } },
+    bottom: { style: "thin", color: { argb: "FFB8C7E8" } },
+    right: { style: "thin", color: { argb: "FFB8C7E8" } },
+  };
+}
+
+function addValidationSheet(workbook: ExcelJS.Workbook, issues: InvoiceValidationIssue[]): void {
+  const sheet = workbook.addWorksheet("Validation");
+  sheet.columns = [
+    { header: "Severity", key: "severity", width: 12 },
+    { header: "Scope", key: "scope", width: 14 },
+    { header: "Row", key: "row", width: 10 },
+    { header: "Column", key: "column", width: 24 },
+    { header: "Message", key: "message", width: 100 },
+  ];
+  sheet.getRow(1).eachCell(styleHeader);
+
+  if (issues.length === 0) {
+    sheet.addRow({ severity: "OK", scope: "document", row: "", column: "", message: "No deterministic validation issues were found. Visual review is still required." });
+  } else {
+    issues.forEach((issue) => {
+      sheet.addRow({
+        severity: issue.severity.toUpperCase(),
+        scope: issue.scope,
+        row: issue.rowNumber ?? "",
+        column: issue.columnId ?? "",
+        message: issue.message,
+      });
+    });
+  }
+
+  sheet.views = [{ state: "frozen", ySplit: 1 }];
+  sheet.autoFilter = "A1:E1";
+}
+
+export function buildGeminiWorkbook(invoice: GeminiInvoiceJson): ExcelJS.Workbook {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "Sample OCR Gemini Invoice Extractor";
   workbook.created = new Date();
+  workbook.modified = new Date();
+  workbook.subject = "Human-reviewed pharmacy supplier invoice extraction";
 
   const sheet = workbook.addWorksheet("Invoice Table", {
     views: [{ state: "frozen", ySplit: 2 }],
@@ -28,23 +72,15 @@ export async function exportGeminiWorkbook(invoice: GeminiInvoiceJson, sourceNam
   const columnCount = Math.max(1, invoice.columns.length);
   sheet.mergeCells(1, 1, 1, columnCount);
   const titleCell = sheet.getCell(1, 1);
-  titleCell.value = invoice.tableTitle || "Extracted invoice table";
-  titleCell.font = { bold: true, size: 15 };
+  titleCell.value = invoice.tableTitle || invoice.documentType || "Extracted invoice table";
+  titleCell.font = { bold: true, size: 15, color: { argb: "FF172B68" } };
   titleCell.alignment = { vertical: "middle" };
   sheet.getRow(1).height = 26;
 
   invoice.columns.forEach((column, index) => {
     const cell = sheet.getCell(2, index + 1);
     cell.value = column.header;
-    cell.font = { bold: true };
-    cell.alignment = { vertical: "middle", wrapText: true };
-    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFDDE7FF" } };
-    cell.border = {
-      top: { style: "thin" },
-      left: { style: "thin" },
-      bottom: { style: "thin" },
-      right: { style: "thin" },
-    };
+    styleHeader(cell);
   });
 
   invoice.rows.forEach((row, rowIndex) => {
@@ -54,17 +90,23 @@ export async function exportGeminiWorkbook(invoice: GeminiInvoiceJson, sourceNam
       cell.value = row.values[columnIndex] ?? "";
       cell.alignment = { vertical: "top", wrapText: true };
       cell.border = {
-        top: { style: "hair" },
-        left: { style: "hair" },
-        bottom: { style: "hair" },
-        right: { style: "hair" },
+        top: { style: "hair", color: { argb: "FFD4DBE8" } },
+        left: { style: "hair", color: { argb: "FFD4DBE8" } },
+        bottom: { style: "hair", color: { argb: "FFD4DBE8" } },
+        right: { style: "hair", color: { argb: "FFD4DBE8" } },
       };
+      if (row.warnings.length || (row.confidence !== null && row.confidence < 0.7)) {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF4CC" } };
+      }
     }
   });
 
   const tableEndRow = invoice.rows.length + 2;
   if (invoice.columns.length > 0 && tableEndRow >= 2) {
-    sheet.autoFilter = { from: { row: 2, column: 1 }, to: { row: tableEndRow, column: invoice.columns.length } };
+    sheet.autoFilter = {
+      from: { row: 2, column: 1 },
+      to: { row: tableEndRow, column: invoice.columns.length },
+    };
   }
 
   const summaryStart = tableEndRow + 2;
@@ -92,6 +134,7 @@ export async function exportGeminiWorkbook(invoice: GeminiInvoiceJson, sourceNam
   sheet.getCell(finalRowNumber, 1).alignment = { horizontal: "right" };
   sheet.getCell(finalRowNumber, amountColumn).value = invoice.finalAmount ?? "";
   sheet.getCell(finalRowNumber, amountColumn).font = { bold: true, size: 12 };
+  sheet.getCell(finalRowNumber, amountColumn).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE7F7EC" } };
   sheet.getRow(finalRowNumber).height = 23;
 
   invoice.columns.forEach((column, index) => {
@@ -104,17 +147,17 @@ export async function exportGeminiWorkbook(invoice: GeminiInvoiceJson, sourceNam
   jsonSheet.getColumn(1).width = 120;
   JSON.stringify(invoice, null, 2).split("\n").forEach((line) => jsonSheet.addRow([line]));
 
-  const reviewSheet = workbook.addWorksheet("Review");
-  reviewSheet.columns = [
-    { header: "Type", key: "type", width: 18 },
-    { header: "Message", key: "message", width: 100 },
-  ];
-  invoice.warnings.forEach((message) => reviewSheet.addRow({ type: "Model warning", message }));
-  invoice.unresolvedText.forEach((message) => reviewSheet.addRow({ type: "Unresolved text", message }));
-  invoice.rows.forEach((row) => row.warnings.forEach((message) => reviewSheet.addRow({ type: `Row ${row.rowNumber}`, message })));
-  if (invoice.finalAmount === null) reviewSheet.addRow({ type: "Blocking", message: "Final amount was not extracted." });
+  addValidationSheet(workbook, validateInvoice(invoice));
+  return workbook;
+}
 
-  const output = await workbook.xlsx.writeBuffer();
+export async function buildGeminiWorkbookBuffer(invoice: GeminiInvoiceJson): Promise<ArrayBuffer> {
+  const workbook = buildGeminiWorkbook(invoice);
+  return workbook.xlsx.writeBuffer();
+}
+
+export async function exportGeminiWorkbook(invoice: GeminiInvoiceJson, sourceName: string): Promise<void> {
+  const output = await buildGeminiWorkbookBuffer(invoice);
   downloadBlob(
     new Blob([output], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
     `${safeFileName(sourceName.replace(/\.[^.]+$/, ""))}-gemini.xlsx`,
