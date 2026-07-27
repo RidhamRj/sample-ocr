@@ -21,6 +21,7 @@ invoice image
        Gemini structured-output request
        JSON normalization and response checks
   -> editable browser worksheet
+       supplier name, invoice number, bill date, GST jurisdiction
        dynamic printed column headings
        every item row
        all tax / discount / adjustment rows
@@ -34,6 +35,10 @@ invoice image
 
 ## What Gemini must extract
 
+- supplier/vendor name, excluding the buyer/customer name;
+- exact printed invoice or bill number;
+- exact printed bill date without silently changing its format;
+- GST jurisdiction as `intrastate`, `interstate`, `not_applicable`, or `unknown`;
 - every printed column heading from left to right;
 - every product row in printed order;
 - blank cells as `null` so later values do not shift;
@@ -44,19 +49,27 @@ invoice image
 - freight, handling, round-off and credit/debit adjustments;
 - the exact printed final payable amount.
 
-Supplier address, phone, GSTIN, declarations, bank details and unrelated prose are intentionally excluded from V1.
+GST jurisdiction is conservative:
+
+- `intrastate` when CGST and SGST are charged or supplier/buyer GST state codes clearly match;
+- `interstate` when IGST is charged or the state codes clearly differ;
+- `not_applicable` only when the document clearly indicates GST does not apply;
+- `unknown` when evidence is missing, ambiguous, or conflicting.
+
+Supplier and buyer GSTIN state codes may be used to classify jurisdiction, but full GSTINs, addresses, phone numbers, declarations, bank details and unrelated prose are intentionally excluded from this prototype output.
 
 ## Reliability boundary
 
 Structured output guarantees the JSON shape, not factual correctness. The app therefore:
 
 - preserves the source image beside the extracted table;
+- allows supplier name, invoice number, bill date and GST jurisdiction to be edited;
 - allows headings, cells, rows, summary lines and final amount to be edited;
-- flags missing final amounts, blank or duplicate rows, invalid numeric-looking cells, low confidence and unresolved text;
-- includes all warnings in the exported workbook;
+- flags missing invoice metadata, unknown GST jurisdiction, missing final amounts, blank or duplicate rows, invalid numeric-looking cells, low confidence and unresolved text;
+- includes invoice metadata and all warnings in the exported workbook;
 - never writes directly to pharmacy inventory.
 
-Human review remains mandatory before using batch, expiry, quantity, rate, tax or final amount data.
+Human review remains mandatory before using supplier identity, invoice metadata, GST jurisdiction, batch, expiry, quantity, rate, tax or final amount data.
 
 ## Requirements
 
@@ -127,6 +140,22 @@ Request body:
 }
 ```
 
+The response now includes:
+
+```json
+{
+  "documentType": "Tax Invoice",
+  "supplierName": "ABC Pharma Agencies",
+  "invoiceNumber": "INV/0042",
+  "billDate": "27/07/2026",
+  "gstJurisdiction": "intrastate",
+  "columns": [],
+  "rows": [],
+  "summaryRows": [],
+  "finalAmount": "168.00"
+}
+```
+
 The key header is unnecessary when `GEMINI_API_KEY` is configured on the server.
 
 ## Supported models
@@ -147,11 +176,11 @@ When a selected model is rejected specifically because it is unavailable to the 
 
 The browser generates the workbook from the reviewed JSON. The workbook contains:
 
-1. `Invoice Table` — dynamic item columns, every product row, taxes, totals and final amount;
+1. `Invoice Table` — supplier name, invoice number, bill date, GST jurisdiction, dynamic item columns, every product row, taxes, totals and final amount;
 2. `Gemini JSON` — the complete reviewed JSON;
 3. `Validation` — deterministic errors and warnings.
 
-All source cell values remain strings so batch numbers, expiry formats, leading zeros and printed decimal precision are not silently changed.
+All source cell values remain strings so invoice numbers, batch numbers, expiry formats, leading zeros and printed decimal precision are not silently changed.
 
 ## Validation
 
@@ -165,7 +194,7 @@ This runs:
 
 - Node syntax validation for the Vercel API;
 - current-model migration tests;
-- Gemini structured-output contract tests;
+- supplier identity and GST-jurisdiction schema tests;
 - JSON normalization and deterministic validation tests;
 - JSON-to-XLSX workbook compatibility tests;
 - TypeScript and Vite production build.
@@ -173,7 +202,7 @@ This runs:
 Verified CI run:
 
 ```text
-30251911222
+30262482731
 ```
 
 Verified production deployment:
@@ -185,7 +214,7 @@ https://sample-ocr-ui.vercel.app
 The production bundle is pinned to code commit:
 
 ```text
-77359bd7631a304ee3bf130c94f7644e5b896c40
+481b7d4323fff9ee60acfdb6e1795b711bc16e8d
 ```
 
 The production API reports `gemini-3.5-flash` as its default model and no longer advertises `gemini-2.5-flash`.
