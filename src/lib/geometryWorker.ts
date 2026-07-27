@@ -3,7 +3,7 @@ import type { BrowserGeometryResult } from "../types/canonical";
 interface WorkerResultMessage { type: "result" | "error" | "progress"; requestId: string; result?: BrowserGeometryResult; error?: string; stage?: string; progress?: number; }
 export interface GeometryProgress { stage: string; progress: number; }
 
-const GEOMETRY_TIMEOUT_MS = 25_000;
+const GEOMETRY_TIMEOUT_MS = 18_000;
 
 class GeometryWorkerClient {
   private worker: Worker | null = null;
@@ -30,7 +30,7 @@ class GeometryWorkerClient {
         const message = event.data; if (message.requestId !== requestId) return;
         if (message.type === "progress") {
           const stage = message.stage === "Loading OpenCV.js"
-            ? "Loading OpenCV.js — first run downloads the browser engine"
+            ? "Loading table detector — first run downloads about 11 MB (18 second limit)"
             : message.stage ?? "geometry";
           onProgress?.({ stage, progress: message.progress ?? 0 });
           return;
@@ -41,14 +41,14 @@ class GeometryWorkerClient {
       };
       if (signal?.aborted) return onAbort();
       timeoutId = window.setTimeout(
-        () => fail(new Error("OpenCV geometry timed out after 25 seconds; continuing with OCR-based reconstruction")),
+        () => fail(new Error("OpenCV geometry timed out after 18 seconds; continuing with OCR-based reconstruction")),
         GEOMETRY_TIMEOUT_MS,
       );
       signal?.addEventListener("abort", onAbort, { once: true });
       worker.addEventListener("message", onMessage);
       worker.addEventListener("error", onError);
       worker.addEventListener("messageerror", onMessageError);
-      worker.postMessage({ type: "analyze", requestId, imageBitmap, opencvUrl: import.meta.env.VITE_OPENCV_URL || "/vendor/opencv.js?v=4.5.0" }, [imageBitmap]);
+      worker.postMessage({ type: "analyze", requestId, imageBitmap, opencvUrl: import.meta.env.VITE_OPENCV_URL || "/vendor/opencv.js?v=4.13.0-fallback1" }, [imageBitmap]);
     });
   }
 }
