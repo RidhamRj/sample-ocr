@@ -170,6 +170,20 @@ This runs:
 - JSON-to-XLSX workbook compatibility tests;
 - TypeScript and Vite production build.
 
+Verified CI run:
+
+```text
+30251911222
+```
+
+Verified production deployment:
+
+```text
+https://sample-ocr-ui.vercel.app
+```
+
+The production API reports `gemini-3.5-flash` as its default model and no longer advertises `gemini-2.5-flash`.
+
 ## Vercel
 
 `vercel.json`:
