@@ -17,6 +17,7 @@ invoice image
   -> browser orientation, resize, and JPEG compression
   -> Vercel Node function
        image + optional PharmaCare OCR evidence
+       current Gemini model selection with availability fallback
        Gemini structured-output request
        JSON normalization and response checks
   -> editable browser worksheet
@@ -105,7 +106,7 @@ The user pastes their own key in the UI. It is sent only in the request header a
 GET /api/gemini-invoice
 ```
 
-Returns supported models and whether the deployment has a server key.
+Returns the supported models, default model, and whether the deployment has a server key.
 
 ### Extract invoice
 
@@ -119,7 +120,7 @@ Request body:
 
 ```json
 {
-  "model": "gemini-2.5-flash",
+  "model": "gemini-3.5-flash",
   "mimeType": "image/jpeg",
   "imageBase64": "...",
   "ocrEvidence": "optional PharmaCare OCR text or boxes"
@@ -130,9 +131,17 @@ The key header is unnecessary when `GEMINI_API_KEY` is configured on the server.
 
 ## Supported models
 
-- `gemini-2.5-flash` — default free-tier test model;
-- `gemini-3.5-flash` — stronger visual reasoning when available to the project;
-- `gemini-3.1-flash-lite` — lower-cost/quota-friendly alternative.
+- `gemini-3.5-flash` — default stable free-tier model;
+- `gemini-3.1-flash-lite` — quota-friendly fallback;
+- `gemini-3.5-flash-lite` — newer document-extraction model when available;
+- `gemini-3.6-flash` — advanced multimodal model when available.
+
+Requests that still send retired selections are migrated automatically:
+
+- `gemini-2.5-flash` → `gemini-3.5-flash`;
+- `gemini-2.5-flash-lite` → `gemini-3.1-flash-lite`.
+
+When a selected model is rejected specifically because it is unavailable to the API project, the backend tries the remaining supported models in a deterministic order. Authentication, malformed requests, and general quota failures are returned immediately rather than hidden by retries.
 
 ## Excel output
 
@@ -155,6 +164,7 @@ npm run validate
 This runs:
 
 - Node syntax validation for the Vercel API;
+- current-model migration tests;
 - Gemini structured-output contract tests;
 - JSON normalization and deterministic validation tests;
 - JSON-to-XLSX workbook compatibility tests;
