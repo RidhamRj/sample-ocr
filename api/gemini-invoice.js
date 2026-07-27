@@ -1,5 +1,17 @@
-const ALLOWED_MODELS = new Set(["gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite"]);
-const DEFAULT_MODEL = "gemini-2.5-flash";
+export const SUPPORTED_MODELS = [
+  "gemini-3.5-flash",
+  "gemini-3.1-flash-lite",
+  "gemini-3.5-flash-lite",
+  "gemini-3.6-flash",
+];
+
+export const DEFAULT_MODEL = "gemini-3.5-flash";
+
+const ALLOWED_MODELS = new Set(SUPPORTED_MODELS);
+const RETIRED_MODEL_ALIASES = new Map([
+  ["gemini-2.5-flash", DEFAULT_MODEL],
+  ["gemini-2.5-flash-lite", "gemini-3.1-flash-lite"],
+]);
 const MAX_BASE64_CHARS = 3_500_000;
 const MAX_OCR_EVIDENCE_CHARS = 80_000;
 const REQUEST_TIMEOUT_MS = 110_000;
@@ -159,7 +171,7 @@ export function validateInvoice(rawInvoice) {
   const usedIds = new Map();
   const columns = rawInvoice.columns.map((column, index) => {
     const header = String(column?.header ?? column?.id ?? `Column ${index + 1}`).trim() || `Column ${index + 1}`;
-    const baseId = normalizeId(column?.id ?? header, `column_${index + 1}`);
+    const baseId = normalizeId(column?.id || header, `column_${index + 1}`);
     const count = usedIds.get(baseId) ?? 0;
     usedIds.set(baseId, count + 1);
     return { id: count === 0 ? baseId : `${baseId}_${count + 1}`, header };
@@ -213,6 +225,49 @@ function getApiKey(request) {
   return typeof key === "string" ? key.trim() : null;
 }
 
+export function resolveRequestedModel(value) {
+  const requested = typeof value === "string" ? value.trim() : "";
+  return RETIRED_MODEL_ALIASES.get(requested) || (ALLOWED_MODELS.has(requested) ? requested : DEFAULT_MODEL);
+}
+
+function modelCandidates(requestedModel) {
+  return [requestedModel, ...SUPPORTED_MODELS].filter((model, index, all) => all.indexOf(model) === index);
+}
+
+function isModelAvailabilityError(status, message) {
+  if (![400, 403, 404].includes(status)) return false;
+  return /model|models\//i.test(message)
+    && /not found|not available|no longer available|unsupported|does not exist|not enabled|new users/i.test(message);
+}
+
+async function requestGemini({ apiKey, model, imageBase64, mimeType, evidence, signal }) {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        contents: [{
+          role: "user",
+          parts: [
+            { text: extractionPrompt + evidence },
+            { inline_data: { mime_type: mimeType, data: imageBase64 } },
+          ],
+        }],
+        generationConfig: {
+          maxOutputTokens: 32768,
+          responseMimeType: "application/json",
+          responseSchema: invoiceSchema,
+        },
+      }),
+      signal,
+    },
+  );
+
+  const data = await response.json().catch(() => null);
+  return { response, data };
+}
+
 export const config = { maxDuration: 120 };
 
 export default async function handler(request, response) {
@@ -223,7 +278,8 @@ export default async function handler(request, response) {
     return sendJson(response, 200, {
       status: "ok",
       service: "sample-ocr Gemini invoice extractor",
-      models: [...ALLOWED_MODELS],
+      models: SUPPORTED_MODELS,
+      defaultModel: DEFAULT_MODEL,
       serverKeyConfigured,
       allowsUserKey,
     });
@@ -246,7 +302,8 @@ export default async function handler(request, response) {
     return sendJson(response, 400, { error: "The request body is not valid JSON." });
   }
 
-  const model = ALLOWED_MODELS.has(body?.model) ? body.model : DEFAULT_MODEL;
+  const requestedModel = typeof body?.model === "string" ? body.model : DEFAULT_MODEL;
+  const resolvedModel = resolveRequestedModel(requestedModel);
   const imageBase64 = body?.imageBase64;
   const mimeType = body?.mimeType === "image/jpeg" ? "image/jpeg" : null;
   const ocrEvidence = typeof body?.ocrEvidence === "string" ? body.ocrEvidence.slice(0, MAX_OCR_EVIDENCE_CHARS) : "";
@@ -261,64 +318,64 @@ export default async function handler(request, response) {
   const started = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const evidence = ocrEvidence ? `\n\nOPTIONAL OCR EVIDENCE FROM ANOTHER ENGINE:\n${ocrEvidence}` : "";
+  const attemptedModels = [];
 
   try {
-    const evidence = ocrEvidence
-      ? `\n\nOPTIONAL OCR EVIDENCE FROM ANOTHER ENGINE:\n${ocrEvidence}`
-      : "";
-
-    const upstream = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
-        body: JSON.stringify({
-          contents: [{
-            role: "user",
-            parts: [
-              { text: extractionPrompt + evidence },
-              { inline_data: { mime_type: mimeType, data: imageBase64 } },
-            ],
-          }],
-          generationConfig: {
-            maxOutputTokens: 32768,
-            responseMimeType: "application/json",
-            responseSchema: invoiceSchema,
-          },
-        }),
+    for (const model of modelCandidates(resolvedModel)) {
+      attemptedModels.push(model);
+      const { response: upstream, data: upstreamData } = await requestGemini({
+        apiKey,
+        model,
+        imageBase64,
+        mimeType,
+        evidence,
         signal: controller.signal,
-      },
-    );
+      });
 
-    const upstreamData = await upstream.json().catch(() => null);
-    if (!upstream.ok) {
-      const upstreamMessage = upstreamData?.error?.message || `Gemini returned HTTP ${upstream.status}.`;
-      const status = upstream.status === 429 ? 429 : upstream.status === 400 || upstream.status === 403 ? 400 : 502;
-      return sendJson(response, status, { error: upstreamMessage });
-    }
+      if (!upstream.ok) {
+        const upstreamMessage = upstreamData?.error?.message || `Gemini returned HTTP ${upstream.status}.`;
+        if (isModelAvailabilityError(upstream.status, upstreamMessage) && attemptedModels.length < SUPPORTED_MODELS.length) {
+          continue;
+        }
+        const status = upstream.status === 429 ? 429 : upstream.status === 400 || upstream.status === 403 || upstream.status === 404 ? 400 : 502;
+        return sendJson(response, status, {
+          error: upstreamMessage,
+          attemptedModels,
+        });
+      }
 
-    const rawText = extractText(upstreamData);
-    if (!rawText) {
-      const finishReason = upstreamData?.candidates?.[0]?.finishReason;
-      return sendJson(response, 502, {
-        error: finishReason
-          ? `Gemini returned no structured output (finish reason: ${finishReason}).`
-          : "Gemini returned no structured output.",
+      const rawText = extractText(upstreamData);
+      if (!rawText) {
+        const finishReason = upstreamData?.candidates?.[0]?.finishReason;
+        return sendJson(response, 502, {
+          error: finishReason
+            ? `Gemini returned no structured output (finish reason: ${finishReason}).`
+            : "Gemini returned no structured output.",
+          model,
+        });
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(rawText);
+      } catch {
+        return sendJson(response, 502, { error: "Gemini returned malformed JSON despite structured-output mode.", model });
+      }
+
+      const invoice = validateInvoice(parsed);
+      return sendJson(response, 200, {
+        ...invoice,
+        model,
+        requestedModel,
+        fallbackUsed: model !== requestedModel,
+        processingTimeMs: Date.now() - started,
       });
     }
 
-    let parsed;
-    try {
-      parsed = JSON.parse(rawText);
-    } catch {
-      return sendJson(response, 502, { error: "Gemini returned malformed JSON despite structured-output mode." });
-    }
-
-    const invoice = validateInvoice(parsed);
-    return sendJson(response, 200, {
-      ...invoice,
-      model,
-      processingTimeMs: Date.now() - started,
+    return sendJson(response, 502, {
+      error: "No supported Gemini model was available for this API project.",
+      attemptedModels,
     });
   } catch (error) {
     if (error?.name === "AbortError") return sendJson(response, 504, { error: "Gemini did not respond within 110 seconds." });
