@@ -21,8 +21,12 @@ jobs:
           node-version: 22
       - name: Install dependencies
         run: npm install --no-audit --no-fund
-      - name: Validate API, JSON rules, workbook, and frontend
-        run: npm run validate
+      - name: Validate Vercel API syntax
+        run: npm run check:api
+      - name: Run JSON and workbook tests
+        run: npm test
+      - name: Build TypeScript and Vite frontend
+        run: npm run build
       - name: Record deployable bundle size
         run: |
           node - <<'NODE'
