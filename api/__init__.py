@@ -1,1 +1,0 @@
-"""Standalone Vercel OCR package."""
