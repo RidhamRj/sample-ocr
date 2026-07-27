@@ -47,8 +47,8 @@ describe("Gemini workbook export", () => {
     expect(table?.getCell("A2").value).toBe("PARTICULARS");
     expect(table?.getCell("B4").value).toBe("");
     expect(table?.getCell("D4").value).toBe("50.00");
-    expect(table?.getCell("A7").value).toBe("Taxable Amount");
-    expect(table?.getCell("D10").value).toBe("168.00");
+    expect(table?.getCell("A6").value).toBe("Taxable Amount");
+    expect(table?.getCell("D9").value).toBe("168.00");
 
     const validation = workbook.getWorksheet("Validation");
     const validationText = validation?.getColumn(5).values.map(String).join("\n") ?? "";
