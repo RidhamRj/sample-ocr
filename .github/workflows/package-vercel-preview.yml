@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - agents/image-to-excel-cell-reconstruction-v1
+  pull_request:
 
 permissions:
   contents: read
