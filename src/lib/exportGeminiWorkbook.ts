@@ -29,6 +29,30 @@ function styleHeader(cell: ExcelJS.Cell): void {
   };
 }
 
+function addMetadataRow(
+  sheet: ExcelJS.Worksheet,
+  rowNumber: number,
+  columnCount: number,
+  label: string,
+  value: string | null,
+): void {
+  const labelCell = sheet.getCell(rowNumber, 1);
+  labelCell.value = label;
+  labelCell.font = { bold: true, color: { argb: "FF46536B" } };
+  labelCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF3F6FB" } };
+  labelCell.alignment = { vertical: "middle" };
+
+  if (columnCount === 1) {
+    labelCell.value = `${label}: ${value ?? ""}`;
+    return;
+  }
+
+  if (columnCount > 2) sheet.mergeCells(rowNumber, 2, rowNumber, columnCount);
+  const valueCell = sheet.getCell(rowNumber, 2);
+  valueCell.value = value ?? "";
+  valueCell.alignment = { vertical: "middle", wrapText: true };
+}
+
 function addValidationSheet(workbook: ExcelJS.Workbook, issues: InvoiceValidationIssue[]): void {
   const sheet = workbook.addWorksheet("Validation");
   sheet.columns = [
@@ -65,8 +89,10 @@ export function buildGeminiWorkbook(invoice: GeminiInvoiceJson): ExcelJS.Workboo
   workbook.modified = new Date();
   workbook.subject = "Human-reviewed pharmacy supplier invoice extraction";
 
+  const tableHeaderRow = 7;
+  const dataStartRow = tableHeaderRow + 1;
   const sheet = workbook.addWorksheet("Invoice Table", {
-    views: [{ state: "frozen", ySplit: 2 }],
+    views: [{ state: "frozen", ySplit: tableHeaderRow }],
   });
 
   const columnCount = Math.max(1, invoice.columns.length);
@@ -77,14 +103,19 @@ export function buildGeminiWorkbook(invoice: GeminiInvoiceJson): ExcelJS.Workboo
   titleCell.alignment = { vertical: "middle" };
   sheet.getRow(1).height = 26;
 
+  addMetadataRow(sheet, 2, columnCount, "SUPPLIER NAME", invoice.supplierName);
+  addMetadataRow(sheet, 3, columnCount, "INVOICE NUMBER", invoice.invoiceNumber);
+  addMetadataRow(sheet, 4, columnCount, "BILL DATE", invoice.billDate);
+  addMetadataRow(sheet, 5, columnCount, "GST JURISDICTION", invoice.gstJurisdiction.replaceAll("_", " ").toUpperCase());
+
   invoice.columns.forEach((column, index) => {
-    const cell = sheet.getCell(2, index + 1);
+    const cell = sheet.getCell(tableHeaderRow, index + 1);
     cell.value = column.header;
     styleHeader(cell);
   });
 
   invoice.rows.forEach((row, rowIndex) => {
-    const excelRow = sheet.getRow(rowIndex + 3);
+    const excelRow = sheet.getRow(dataStartRow + rowIndex);
     for (let columnIndex = 0; columnIndex < invoice.columns.length; columnIndex += 1) {
       const cell = excelRow.getCell(columnIndex + 1);
       cell.value = row.values[columnIndex] ?? "";
@@ -101,10 +132,10 @@ export function buildGeminiWorkbook(invoice: GeminiInvoiceJson): ExcelJS.Workboo
     }
   });
 
-  const tableEndRow = invoice.rows.length + 2;
-  if (invoice.columns.length > 0 && tableEndRow >= 2) {
+  const tableEndRow = dataStartRow + invoice.rows.length - 1;
+  if (invoice.columns.length > 0 && tableEndRow >= tableHeaderRow) {
     sheet.autoFilter = {
-      from: { row: 2, column: 1 },
+      from: { row: tableHeaderRow, column: 1 },
       to: { row: tableEndRow, column: invoice.columns.length },
     };
   }
