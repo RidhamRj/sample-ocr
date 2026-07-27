@@ -6,8 +6,11 @@ export type SummaryKind =
   | "igst"
   | "cess"
   | "freight"
+  | "handling"
   | "round_off"
   | "taxable_amount"
+  | "credit_adjustment"
+  | "debit_adjustment"
   | "final_amount"
   | "other";
 
@@ -44,6 +47,16 @@ export interface GeminiInvoiceJson {
   processingTimeMs: number;
 }
 
+export type ValidationSeverity = "error" | "warning";
+
+export interface InvoiceValidationIssue {
+  severity: ValidationSeverity;
+  scope: "document" | "column" | "row" | "summary";
+  message: string;
+  rowNumber?: number;
+  columnId?: string;
+}
+
 export interface PreparedInvoiceImage {
   base64: string;
   mimeType: "image/jpeg";
@@ -55,4 +68,12 @@ export interface PreparedInvoiceImage {
   processedWidth: number;
   processedHeight: number;
   warnings: string[];
+}
+
+export interface GeminiServiceStatus {
+  status: "ok";
+  service: string;
+  models: string[];
+  serverKeyConfigured: boolean;
+  allowsUserKey: boolean;
 }
