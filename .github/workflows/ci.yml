@@ -23,8 +23,12 @@ jobs:
         run: npm install --no-audit --no-fund
       - name: Validate Vercel API syntax
         run: npm run check:api
-      - name: Run JSON and workbook tests
-        run: npm test
+      - name: Test invoice normalization and validation
+        run: npx vitest run tests/invoiceValidation.test.ts --reporter=verbose
+      - name: Test Gemini API contract
+        run: npx vitest run tests/geminiApiContract.test.ts --reporter=verbose
+      - name: Test JSON-to-Excel workbook
+        run: npx vitest run tests/exportGeminiWorkbook.test.ts --reporter=verbose
       - name: Build TypeScript and Vite frontend
         run: npm run build
       - name: Record deployable bundle size
