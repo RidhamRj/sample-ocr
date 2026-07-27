@@ -182,7 +182,13 @@ Verified production deployment:
 https://sample-ocr-ui.vercel.app
 ```
 
-The production API reports `gemini-3.5-flash` as its default model and no longer advertises `gemini-2.5-flash`.
+The production bundle is pinned to code commit:
+
+```text
+77359bd7631a304ee3bf130c94f7644e5b896c40
+```
+
+Later branch commits only document the verified deployment. The production API reports `gemini-3.5-flash` as its default model and no longer advertises `gemini-2.5-flash`.
 
 ## Vercel
 
