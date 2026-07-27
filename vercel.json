@@ -7,12 +7,11 @@
     "deploymentEnabled": false
   },
   "functions": {
-    "api/index.py": {
-      "maxDuration": 60,
-      "excludeFiles": "{tests/**,benchmarks/**,experiments/**,docs/**,src/**,public/**,dist/**,**/*.test.*,**/__pycache__/**}"
+    "api/gemini-invoice.js": {
+      "maxDuration": 120
     }
   },
   "rewrites": [
-    { "source": "/api/:path*", "destination": "/api/index.py" }
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
   ]
 }
