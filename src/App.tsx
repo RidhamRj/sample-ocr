@@ -10,10 +10,12 @@ import type {
   SummaryKind,
 } from "./types/invoice";
 
+const DEFAULT_MODEL = "gemini-3.5-flash";
 const MODELS = [
-  { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash — free-tier stable default" },
-  { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash — stronger visual reasoning" },
-  { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite — quota-friendly" },
+  { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash — free-tier stable default" },
+  { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite — quota-friendly fallback" },
+  { value: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite — document extraction" },
+  { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash — advanced multimodal" },
 ];
 
 const SUMMARY_KINDS: SummaryKind[] = [
@@ -69,7 +71,7 @@ export default function App() {
   const [serviceError, setServiceError] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState(() => sessionStorage.getItem("sample-ocr-gemini-key") ?? "");
   const [rememberKey, setRememberKey] = useState(() => Boolean(sessionStorage.getItem("sample-ocr-gemini-key")));
-  const [model, setModel] = useState("gemini-2.5-flash");
+  const [model, setModel] = useState(DEFAULT_MODEL);
   const [file, setFile] = useState<File | null>(null);
   const [prepared, setPrepared] = useState<PreparedInvoiceImage | null>(null);
   const [ocrEvidence, setOcrEvidence] = useState("");
@@ -159,7 +161,8 @@ export default function App() {
       }));
       setResult(invoice);
       setActiveTab("table");
-      setStatus(`Extracted ${invoice.rows.length} rows and ${invoice.columns.length} columns in ${(invoice.processingTimeMs / 1000).toFixed(1)} seconds.`);
+      const fallbackNote = invoice.model !== model ? ` Automatic fallback used: ${invoice.model}.` : "";
+      setStatus(`Extracted ${invoice.rows.length} rows and ${invoice.columns.length} columns in ${(invoice.processingTimeMs / 1000).toFixed(1)} seconds.${fallbackNote}`);
     } catch (caught) {
       if ((caught as DOMException)?.name !== "AbortError") {
         setError(caught instanceof Error ? caught.message : String(caught));
@@ -267,7 +270,7 @@ export default function App() {
 
       <section className="control-grid">
         <article className="panel setup-panel">
-          <div className="panel-heading"><span className="step">1</span><div><h2>Gemini access</h2><p>Use the free Google AI Studio key for this test app, or configure a server key on Vercel.</p></div></div>
+          <div className="panel-heading"><span className="step">1</span><div><h2>Gemini access</h2><p>Use a Google AI Studio key for this test app, or configure a server key on Vercel.</p></div></div>
           {serverKeyConfigured ? (
             <div className="server-key-note"><strong>Server key configured</strong><span>The browser does not need to receive or store the key.</span></div>
           ) : (
@@ -279,6 +282,7 @@ export default function App() {
           )}
           <label className="field-label" htmlFor="model">Model</label>
           <select id="model" className="text-input" value={model} onChange={(event) => setModel(event.target.value)}>{MODELS.map((entry) => <option key={entry.value} value={entry.value}>{entry.label}</option>)}</select>
+          <small>Unavailable models automatically fall back to another supported model.</small>
         </article>
 
         <article className="panel upload-panel">
