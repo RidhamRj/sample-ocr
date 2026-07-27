@@ -14,6 +14,12 @@ export type SummaryKind =
   | "final_amount"
   | "other";
 
+export type GstJurisdiction =
+  | "intrastate"
+  | "interstate"
+  | "not_applicable"
+  | "unknown";
+
 export interface InvoiceColumn {
   id: string;
   header: string;
@@ -34,6 +40,10 @@ export interface InvoiceSummaryRow {
 
 export interface GeminiInvoiceJson {
   documentType: string;
+  supplierName: string | null;
+  invoiceNumber: string | null;
+  billDate: string | null;
+  gstJurisdiction: GstJurisdiction;
   tableTitle: string | null;
   currency: string | null;
   columns: InvoiceColumn[];
@@ -74,6 +84,7 @@ export interface GeminiServiceStatus {
   status: "ok";
   service: string;
   models: string[];
+  defaultModel?: string;
   serverKeyConfigured: boolean;
   allowsUserKey: boolean;
 }
