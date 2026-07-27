@@ -1,138 +1,177 @@
 # sample-ocr
 
-Standalone **image-to-editable-Excel** application. It preserves invoice table geometry and blank cells instead of flattening OCR text into shifting rows.
+Standalone pharmacy supplier-invoice **image → Gemini JSON → editable Excel** test application.
+
+The production path no longer depends on OpenCV table detection, RapidOCR, ONNX Runtime, Python, a GPU, or a database. Gemini interprets the invoice image, returns strict JSON, the browser lets the user correct it, and ExcelJS builds the workbook locally.
+
+## Active branch
+
+```text
+agents/gemini-invoice-json-v1
+```
 
 ## Architecture
 
 ```text
-image
-  -> browser EXIF orientation + resize/compression
-  -> lazy OpenCV.js Web Worker
-       page contour / perspective / deskew
-       horizontal + vertical lines
-       intersections / row + column boundaries
-       explicit cell rectangles
-  -> standalone Vercel Python RapidOCR function
-       JSON text boxes only
-  -> browser OCR-box / cell fusion
-  -> canonical table JSON
-  -> editable worksheet
-  -> lazy ExcelJS XLSX export
+invoice image
+  -> browser orientation, resize, and JPEG compression
+  -> Vercel Node function
+       image + optional PharmaCare OCR evidence
+       Gemini structured-output request
+       JSON normalization and response checks
+  -> editable browser worksheet
+       dynamic printed column headings
+       every item row
+       all tax / discount / adjustment rows
+       final payable amount
+       deterministic validation warnings
+  -> local ExcelJS workbook
+       Invoice Table
+       Gemini JSON
+       Validation
 ```
 
-There is **no database, inventory code, supplier parser, paid API, server-side XLSX generation or PharmacyCare runtime dependency**.
+## What Gemini must extract
 
-## Branch
+- every printed column heading from left to right;
+- every product row in printed order;
+- blank cells as `null` so later values do not shift;
+- pack, batch, expiry, quantity, free quantity, MRP, rate, discount, GST, tax and amount fields when present;
+- subtotal and taxable value;
+- trade, cash and scheme discounts;
+- CGST, SGST, IGST and cess;
+- freight, handling, round-off and credit/debit adjustments;
+- the exact printed final payable amount.
 
-Implementation target: `agents/image-to-excel-cell-reconstruction-v1`.
+Supplier address, phone, GSTIN, declarations, bank details and unrelated prose are intentionally excluded from V1.
+
+## Reliability boundary
+
+Structured output guarantees the JSON shape, not factual correctness. The app therefore:
+
+- preserves the source image beside the extracted table;
+- allows headings, cells, rows, summary lines and final amount to be edited;
+- flags missing final amounts, blank or duplicate rows, invalid numeric-looking cells, low confidence and unresolved text;
+- includes all warnings in the exported workbook;
+- never writes directly to pharmacy inventory.
+
+Human review remains mandatory before using batch, expiry, quantity, rate, tax or final amount data.
 
 ## Requirements
 
 - Node.js 22
-- Python 3.12 for Vercel parity
-- A modern browser with Web Workers, WebAssembly, `createImageBitmap` and canvas support
+- npm
+- a modern browser with `createImageBitmap` and canvas support
+- a Gemini API key from Google AI Studio, unless a server key is configured
 
 ## Local setup
 
 ```bash
 npm install
-npm run prepare:opencv
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Start the OCR API:
-
-```bash
-uvicorn api.index:app --reload --port 8000
-```
-
-Start Vite in another terminal:
-
-```bash
+cp .env.example .env.local
 npm run dev
 ```
 
-Vite proxies `/api` to `http://127.0.0.1:8000`.
+Vite serves the frontend. The Vercel API function is available when running through Vercel development or deployment tooling.
 
-## Environment
+## Gemini key modes
 
-Copy `.env.example` when needed.
+### Recommended shared deployment
 
-- `OCR_API_KEY`: optional server secret. When configured, clients must send `x-api-key`.
-- `VITE_OCR_API_KEY`: matching browser build value for private deployments. Do not treat a Vite variable as a durable secret in a public frontend.
-- `OCR_MAX_IMAGE_BYTES`: server hard limit, clamped to 3.6 MB.
-- `OCR_MAX_TOTAL_BYTES`: server hard limit, clamped to 3.8 MB.
-- `OCR_MAX_IMAGE_DIMENSION`: server resize limit, clamped to 2,800 px.
-- `OCR_MAX_ITEMS`: maximum JSON OCR items, clamped to 4,000.
-- `OPENCV_JS_URL`: optional build-time override for the official OpenCV.js download.
+Configure this only on the server:
 
-For a public Hobby demo, leave `OCR_API_KEY` unset and rely on strict one-page/payload limits plus Vercel abuse controls. A browser-exposed `VITE_OCR_API_KEY` is not secret.
-
-## Vercel deployment
-
-The repository is a single Vercel project:
-
-- Vite static frontend from `dist/`;
-- FastAPI function at `api/index.py`;
-- rewrite from `/api/*` to the function;
-- official OpenCV.js downloaded during `prebuild` and served as `/vendor/opencv.js`;
-- frontend/tests/fixtures excluded from the Python function bundle;
-- XLSX generated in the browser.
-
-Official limits used by the design are documented in `docs/OPEN_SOURCE_EVALUATION.md`. Client image preparation targets **3.2 MB**, below the server hard limit and Vercel's 4.5 MB function body limit.
-
-## Canonical JSON
-
-The worksheet and exporter consume the same `CanonicalDocument` object. Each cell includes:
-
-- table, row and column identity;
-- rectangle in normalized page coordinates;
-- row/column spans;
-- text and source OCR IDs;
-- confidence, warning and manual-edit state.
-
-Unassigned OCR is retained separately. Empty cells remain explicit objects. Wide text lines that cross several columns are left unresolved rather than split on spaces.
-
-## XLSX output
-
-Export is lazy and local. The workbook contains:
-
-1. one worksheet per detected table;
-2. `Raw OCR`;
-3. `Unassigned OCR`;
-4. `Diagnostics`.
-
-It preserves blank coordinates, merges, row heights, column widths, wrapped text and warning styles.
-
-## Tests and benchmarks
-
-```bash
-npm test
-npm run build
-npm run check:python
-npm run benchmark:fixtures
-npm run benchmark:python
-npm run benchmark:browser
-python scripts/verify_xlsx.py benchmarks/results/browser-export-compatibility.xlsx
+```env
+GEMINI_API_KEY=your_key
+ALLOW_USER_GEMINI_KEY=false
 ```
 
-The browser benchmark runs the production OpenCV worker in headless Chromium. Candidate B is isolated under `experiments/` and is never imported by the production API.
+The browser never receives the server key.
 
-Research and evidence:
+### Test deployment
 
-- `docs/OPEN_SOURCE_EVALUATION.md`
-- `docs/PHARMACYCARE_OCR_ORIGIN.md`
-- `docs/ARCHITECTURE_BENCHMARK.md`
-- `THIRD_PARTY_NOTICES.md`
+Leave `GEMINI_API_KEY` empty and use:
 
-## Current V1 boundaries
+```env
+ALLOW_USER_GEMINI_KEY=true
+```
 
-- images only: PNG, JPEG and WebP;
-- one page per request;
-- OCR boxes are RapidOCR line-level boxes unless a future benchmark proves a safe word-level path;
-- borderless reconstruction requires at least three repeated rows and columns;
-- no medicine-header inference, supplier templates or business calculations;
-- real invoice accuracy must be measured before claiming universal reliability.
+The user pastes their own key in the UI. It is sent only in the request header and may optionally be remembered in that browser tab through `sessionStorage`. It is not written to the repository or stored by the API function.
+
+## API
+
+### Health and capabilities
+
+```http
+GET /api/gemini-invoice
+```
+
+Returns supported models and whether the deployment has a server key.
+
+### Extract invoice
+
+```http
+POST /api/gemini-invoice
+Content-Type: application/json
+x-gemini-api-key: optional-user-key
+```
+
+Request body:
+
+```json
+{
+  "model": "gemini-2.5-flash",
+  "mimeType": "image/jpeg",
+  "imageBase64": "...",
+  "ocrEvidence": "optional PharmaCare OCR text or boxes"
+}
+```
+
+The key header is unnecessary when `GEMINI_API_KEY` is configured on the server.
+
+## Supported models
+
+- `gemini-2.5-flash` — default free-tier test model;
+- `gemini-3.5-flash` — stronger visual reasoning when available to the project;
+- `gemini-3.1-flash-lite` — lower-cost/quota-friendly alternative.
+
+## Excel output
+
+The browser generates the workbook from the reviewed JSON. The workbook contains:
+
+1. `Invoice Table` — dynamic item columns, every product row, taxes, totals and final amount;
+2. `Gemini JSON` — the complete reviewed JSON;
+3. `Validation` — deterministic errors and warnings.
+
+All source cell values remain strings so batch numbers, expiry formats, leading zeros and printed decimal precision are not silently changed.
+
+## Validation
+
+No Gemini key is used during automated tests.
+
+```bash
+npm run validate
+```
+
+This runs:
+
+- Node syntax validation for the Vercel API;
+- Gemini structured-output contract tests;
+- JSON normalization and deterministic validation tests;
+- JSON-to-XLSX workbook compatibility tests;
+- TypeScript and Vite production build.
+
+## Vercel
+
+`vercel.json`:
+
+- builds the Vite frontend into `dist/`;
+- deploys `api/gemini-invoice.js` as a Node function;
+- allows up to 120 seconds for Gemini processing;
+- keeps Git automatic deployments disabled;
+- rewrites non-API routes to the Vite application.
+
+The browser compresses a single invoice image before upload so the Base64 JSON request remains below Vercel's body-size boundary.
+
+## Privacy
+
+Invoices sent through the free Gemini tier are processed by Google under the terms of that tier. Do not send prescriptions, patient information, customer phone numbers or unrelated personal data. A commercial pharmacy deployment should review data-processing requirements and use an appropriate paid configuration before onboarding external customers.
