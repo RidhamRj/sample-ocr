@@ -1,77 +1,116 @@
 const ALLOWED_MODELS = new Set(["gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite"]);
-const MAX_BASE64_CHARS = 3_650_000;
+const DEFAULT_MODEL = "gemini-2.5-flash";
+const MAX_BASE64_CHARS = 3_500_000;
+const MAX_OCR_EVIDENCE_CHARS = 80_000;
+const REQUEST_TIMEOUT_MS = 110_000;
 
-const invoiceSchema = {
+const SUMMARY_KINDS = [
+  "subtotal",
+  "discount",
+  "cgst",
+  "sgst",
+  "igst",
+  "cess",
+  "freight",
+  "handling",
+  "round_off",
+  "taxable_amount",
+  "credit_adjustment",
+  "debit_adjustment",
+  "final_amount",
+  "other",
+];
+
+export const invoiceSchema = {
   type: "object",
   properties: {
     documentType: { type: "string", description: "Printed document type such as Tax Invoice or Purchase Invoice." },
-    tableTitle: { type: ["string", "null"], description: "Printed title of the main product table, when present." },
-    currency: { type: ["string", "null"], description: "Currency code or printed currency symbol, usually INR for Indian pharmacy invoices." },
+    tableTitle: { type: "string", nullable: true, description: "Printed title of the main product table, when present." },
+    currency: { type: "string", nullable: true, description: "Currency code or printed currency symbol, usually INR for Indian pharmacy invoices." },
     columns: {
       type: "array",
+      description: "Every printed column in the main item table, preserved from left to right.",
       items: {
         type: "object",
         properties: {
           id: { type: "string", description: "Stable lowercase snake_case identifier inferred from the printed header." },
-          header: { type: "string", description: "The exact printed column heading, preserved from left to right." }
+          header: { type: "string", description: "The exact or closest readable printed column heading." },
         },
-        required: ["id", "header"]
-      }
+        required: ["id", "header"],
+      },
     },
     rows: {
       type: "array",
+      description: "Every product row in printed order. Do not include tax summary rows here.",
       items: {
         type: "object",
         properties: {
           rowNumber: { type: "integer" },
-          values: { type: "array", items: { type: ["string", "null"] }, description: "One value per detected column, in exactly the same order as columns." },
-          confidence: { type: ["number", "null"] },
-          warnings: { type: "array", items: { type: "string" } }
+          values: {
+            type: "array",
+            items: { type: "string", nullable: true },
+            description: "One value per detected column, in exactly the same order as columns. Preserve blank cells as null.",
+          },
+          confidence: { type: "number", nullable: true, description: "Confidence from 0 to 1 for the complete row." },
+          warnings: { type: "array", items: { type: "string" } },
         },
-        required: ["rowNumber", "values", "confidence", "warnings"]
-      }
+        required: ["rowNumber", "values", "confidence", "warnings"],
+      },
     },
     summaryRows: {
       type: "array",
+      description: "All printed monetary totals, taxes, discounts, freight, round-off, and adjustments affecting the payable amount.",
       items: {
         type: "object",
         properties: {
           label: { type: "string", description: "Exact printed label, including percentage when printed." },
-          amount: { type: ["string", "null"], description: "Exact printed monetary value without recalculating it." },
-          kind: { type: "string", enum: ["subtotal", "discount", "cgst", "sgst", "igst", "cess", "freight", "round_off", "taxable_amount", "final_amount", "other"] }
+          amount: { type: "string", nullable: true, description: "Exact printed monetary value. Never recalculate or repair it." },
+          kind: { type: "string", enum: SUMMARY_KINDS },
         },
-        required: ["label", "amount", "kind"]
-      }
+        required: ["label", "amount", "kind"],
+      },
     },
-    finalAmount: { type: ["string", "null"], description: "The exact printed payable, net, grand total, or invoice final amount." },
+    finalAmount: { type: "string", nullable: true, description: "Exact printed payable, net, grand total, or invoice final amount." },
     unresolvedText: { type: "array", items: { type: "string" } },
     warnings: { type: "array", items: { type: "string" } },
-    extractionConfidence: { type: ["number", "null"] }
+    extractionConfidence: { type: "number", nullable: true, description: "Overall extraction confidence from 0 to 1." },
   },
-  required: ["documentType", "tableTitle", "currency", "columns", "rows", "summaryRows", "finalAmount", "unresolvedText", "warnings", "extractionConfidence"]
+  required: [
+    "documentType",
+    "tableTitle",
+    "currency",
+    "columns",
+    "rows",
+    "summaryRows",
+    "finalAmount",
+    "unresolvedText",
+    "warnings",
+    "extractionConfidence",
+  ],
 };
 
-const prompt = `You are extracting the main item table from a pharmacy supplier invoice image into strict JSON for an Excel workbook.
+export const extractionPrompt = `You are converting a pharmacy supplier invoice image into strict JSON that will be used to create an Excel workbook.
 
-PRIMARY TASK
-1. Inspect the image visually and identify the actual printed item-table column headings from left to right.
-2. Return every product or item row in the same order as printed.
-3. Return one value per column for every row. values.length MUST equal columns.length.
-4. Preserve exact printed text for product names, packs, batch numbers, expiry values, quantities, free quantities, MRP, rates, discounts, GST percentages, tax values, and amounts.
-5. Keep wrapped product descriptions in their original product row. Never merge two distinct product rows.
-6. Preserve blank cells as null. Do not shift later values left when a cell is blank.
+MAIN ITEM TABLE
+1. Visually inspect the invoice and identify the actual printed item-table column headings from left to right.
+2. Include every printed item-table column, even serial number, pack, HSN, batch, expiry, quantity, free quantity, MRP, rate, discount, GST percentage, tax value, or amount columns.
+3. Return every product or item row in exactly the same order as printed.
+4. Each row values array MUST have exactly one value for every detected column and MUST follow the columns array order.
+5. Preserve printed text and decimal precision. Preserve product names, pack formats, batch numbers, expiry formats, quantities, rates, discounts, GST values, and amounts.
+6. Keep wrapped product descriptions in their original row. Never merge two distinct product rows and never repeat a row.
+7. Preserve genuinely blank cells as null. Never shift later values left when a printed cell is blank.
 
-SUMMARY AND TAX REQUIREMENTS
-7. Extract every monetary summary line that affects the invoice total: subtotal, taxable amount, trade discount, cash discount, scheme discount, CGST, SGST, IGST, cess, freight, delivery, round-off, credit adjustment, and any other printed adjustment.
-8. Preserve the printed label and printed amount. Do not calculate or repair a value merely to make totals match.
-9. finalAmount must be the exact printed payable, net, grand-total, or invoice final amount. Use null only when it truly cannot be read.
+TAXES, TOTALS, AND ADJUSTMENTS
+8. Extract every monetary summary line that affects the invoice total, including subtotal, taxable amount, trade/cash/scheme discount, CGST, SGST, IGST, cess, freight, handling, delivery, round-off, credit/debit adjustment, and other printed adjustments.
+9. Keep tax or HSN summary-table lines out of product rows. Include their monetary totals in summaryRows when they affect the invoice total.
+10. Preserve each printed summary label and amount. Do not calculate, repair, or invent a value merely to make totals match.
+11. finalAmount must contain the exact printed payable, net, grand-total, or invoice amount. Use null only when it truly cannot be read.
 
-BOUNDARIES
-10. Ignore supplier address, phone, GSTIN, customer details, declaration text, bank details, signatures, and general header or footer prose unless the text is part of the product table or a monetary summary.
-11. Do not treat HSN or GST summary tables as product rows. Their monetary tax totals may be included in summaryRows when they affect the final total.
-12. Do not invent unreadable text or numbers. Use null and explain uncertainty in warnings or unresolvedText.
-13. Prefer the image over OCR evidence when OCR evidence conflicts with clearly readable visual text. Treat OCR evidence only as supporting evidence.
-14. Return JSON only. No markdown and no explanation outside the schema.`;
+RELIABILITY RULES
+12. Ignore supplier address, phone, GSTIN, customer details, bank details, declarations, signatures, and unrelated prose.
+13. Never invent unreadable text or numbers. Use null and describe the uncertainty in warnings or unresolvedText.
+14. The image is the primary source. OCR evidence, when supplied, is supporting evidence only and may contain mistakes.
+15. Return only schema-conforming JSON. Do not return markdown or explanatory prose.`;
 
 function sendJson(response, status, payload) {
   response.status(status);
@@ -88,44 +127,117 @@ function extractText(data) {
     .join("") ?? "";
 }
 
-function validateInvoice(invoice) {
-  if (!invoice || typeof invoice !== "object") throw new Error("Gemini returned no invoice object.");
-  if (!Array.isArray(invoice.columns) || invoice.columns.length === 0) throw new Error("Gemini did not detect a product table header.");
-  if (!Array.isArray(invoice.rows)) throw new Error("Gemini returned an invalid rows array.");
+function normalizeId(value, fallback) {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 60);
+  return normalized || fallback;
+}
 
-  const columnCount = invoice.columns.length;
-  invoice.rows = invoice.rows.map((row, index) => {
-    const values = Array.isArray(row.values) ? row.values.slice(0, columnCount) : [];
-    while (values.length < columnCount) values.push(null);
+function nullableString(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text ? text : null;
+}
+
+function stringArray(value) {
+  return Array.isArray(value) ? value.map((entry) => String(entry).trim()).filter(Boolean) : [];
+}
+
+function confidence(value) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : null;
+}
+
+export function validateInvoice(rawInvoice) {
+  if (!rawInvoice || typeof rawInvoice !== "object") throw new Error("Gemini returned no invoice object.");
+  if (!Array.isArray(rawInvoice.columns) || rawInvoice.columns.length === 0) throw new Error("Gemini did not detect a product-table header.");
+  if (!Array.isArray(rawInvoice.rows) || rawInvoice.rows.length === 0) throw new Error("Gemini did not detect any product rows.");
+
+  const usedIds = new Map();
+  const columns = rawInvoice.columns.map((column, index) => {
+    const header = String(column?.header ?? column?.id ?? `Column ${index + 1}`).trim() || `Column ${index + 1}`;
+    const baseId = normalizeId(column?.id ?? header, `column_${index + 1}`);
+    const count = usedIds.get(baseId) ?? 0;
+    usedIds.set(baseId, count + 1);
+    return { id: count === 0 ? baseId : `${baseId}_${count + 1}`, header };
+  });
+
+  const rows = rawInvoice.rows.map((row, index) => {
+    const sourceValues = Array.isArray(row?.values) ? row.values : [];
+    const values = Array.from({ length: columns.length }, (_, columnIndex) => nullableString(sourceValues[columnIndex]));
     return {
-      rowNumber: Number.isInteger(row.rowNumber) ? row.rowNumber : index + 1,
+      rowNumber: Number.isInteger(row?.rowNumber) && row.rowNumber > 0 ? row.rowNumber : index + 1,
       values,
-      confidence: typeof row.confidence === "number" ? Math.max(0, Math.min(1, row.confidence)) : null,
-      warnings: Array.isArray(row.warnings) ? row.warnings.map(String) : []
+      confidence: confidence(row?.confidence),
+      warnings: stringArray(row?.warnings),
     };
   });
 
-  invoice.summaryRows = Array.isArray(invoice.summaryRows) ? invoice.summaryRows : [];
-  invoice.unresolvedText = Array.isArray(invoice.unresolvedText) ? invoice.unresolvedText.map(String) : [];
-  invoice.warnings = Array.isArray(invoice.warnings) ? invoice.warnings.map(String) : [];
-  if (invoice.finalAmount === null || invoice.finalAmount === undefined || invoice.finalAmount === "") {
-    invoice.warnings.push("Final payable amount was not confidently extracted. Verify the invoice footer manually.");
-    invoice.finalAmount = null;
-  }
-  return invoice;
+  const summaryRows = Array.isArray(rawInvoice.summaryRows)
+    ? rawInvoice.summaryRows.map((summary) => ({
+        label: String(summary?.label ?? "").trim(),
+        amount: nullableString(summary?.amount),
+        kind: SUMMARY_KINDS.includes(summary?.kind) ? summary.kind : "other",
+      }))
+    : [];
+
+  const warnings = stringArray(rawInvoice.warnings);
+  const finalAmount = nullableString(rawInvoice.finalAmount);
+  if (!finalAmount) warnings.push("Final payable amount was not confidently extracted. Verify the invoice footer manually.");
+
+  return {
+    documentType: String(rawInvoice.documentType ?? "Invoice").trim() || "Invoice",
+    tableTitle: nullableString(rawInvoice.tableTitle),
+    currency: nullableString(rawInvoice.currency),
+    columns,
+    rows,
+    summaryRows,
+    finalAmount,
+    unresolvedText: stringArray(rawInvoice.unresolvedText),
+    warnings,
+    extractionConfidence: confidence(rawInvoice.extractionConfidence),
+  };
+}
+
+function getApiKey(request) {
+  const serverKey = process.env.GEMINI_API_KEY?.trim();
+  if (serverKey) return serverKey;
+
+  const allowsUserKey = process.env.ALLOW_USER_GEMINI_KEY !== "false";
+  if (!allowsUserKey) return null;
+  const headerValue = request.headers["x-gemini-api-key"];
+  const key = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  return typeof key === "string" ? key.trim() : null;
 }
 
 export const config = { maxDuration: 120 };
 
 export default async function handler(request, response) {
+  const serverKeyConfigured = Boolean(process.env.GEMINI_API_KEY?.trim());
+  const allowsUserKey = process.env.ALLOW_USER_GEMINI_KEY !== "false";
+
   if (request.method === "GET") {
-    return sendJson(response, 200, { status: "ok", service: "sample-ocr Gemini invoice extractor", models: [...ALLOWED_MODELS] });
+    return sendJson(response, 200, {
+      status: "ok",
+      service: "sample-ocr Gemini invoice extractor",
+      models: [...ALLOWED_MODELS],
+      serverKeyConfigured,
+      allowsUserKey,
+    });
   }
   if (request.method !== "POST") return sendJson(response, 405, { error: "Use POST for invoice extraction." });
 
-  const apiKeyHeader = request.headers["x-gemini-api-key"];
-  const apiKey = Array.isArray(apiKeyHeader) ? apiKeyHeader[0] : apiKeyHeader;
-  if (!apiKey || typeof apiKey !== "string" || apiKey.length < 20) return sendJson(response, 400, { error: "A valid Gemini API key is required." });
+  const apiKey = getApiKey(request);
+  if (!apiKey || apiKey.length < 20) {
+    return sendJson(response, 400, {
+      error: serverKeyConfigured
+        ? "The configured Gemini API key is invalid."
+        : "Paste a valid Gemini API key or configure GEMINI_API_KEY on the server.",
+    });
+  }
 
   let body;
   try {
@@ -134,33 +246,49 @@ export default async function handler(request, response) {
     return sendJson(response, 400, { error: "The request body is not valid JSON." });
   }
 
-  const model = ALLOWED_MODELS.has(body?.model) ? body.model : "gemini-2.5-flash";
+  const model = ALLOWED_MODELS.has(body?.model) ? body.model : DEFAULT_MODEL;
   const imageBase64 = body?.imageBase64;
   const mimeType = body?.mimeType === "image/jpeg" ? "image/jpeg" : null;
-  const ocrEvidence = typeof body?.ocrEvidence === "string" ? body.ocrEvidence.slice(0, 80_000) : "";
+  const ocrEvidence = typeof body?.ocrEvidence === "string" ? body.ocrEvidence.slice(0, MAX_OCR_EVIDENCE_CHARS) : "";
 
-  if (!mimeType || typeof imageBase64 !== "string" || imageBase64.length < 1000) return sendJson(response, 400, { error: "A prepared JPEG invoice image is required." });
-  if (imageBase64.length > MAX_BASE64_CHARS) return sendJson(response, 413, { error: "The prepared image is too large. Crop empty margins and retry." });
+  if (!mimeType || typeof imageBase64 !== "string" || imageBase64.length < 1000) {
+    return sendJson(response, 400, { error: "A prepared JPEG invoice image is required." });
+  }
+  if (imageBase64.length > MAX_BASE64_CHARS) {
+    return sendJson(response, 413, { error: "The prepared image is too large. Crop empty margins and retry." });
+  }
 
   const started = Date.now();
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 110_000);
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    const evidence = ocrEvidence ? `\n\nOPTIONAL OCR EVIDENCE FROM ANOTHER ENGINE:\n${ocrEvidence}` : "";
-    const upstream = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt + evidence }, { inline_data: { mime_type: mimeType, data: imageBase64 } }] }],
-        generationConfig: {
-          temperature: 0,
-          responseMimeType: "application/json",
-          responseSchema: invoiceSchema
-        }
-      }),
-      signal: controller.signal
-    });
+    const evidence = ocrEvidence
+      ? `\n\nOPTIONAL OCR EVIDENCE FROM ANOTHER ENGINE:\n${ocrEvidence}`
+      : "";
+
+    const upstream = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+        body: JSON.stringify({
+          contents: [{
+            role: "user",
+            parts: [
+              { text: extractionPrompt + evidence },
+              { inline_data: { mime_type: mimeType, data: imageBase64 } },
+            ],
+          }],
+          generationConfig: {
+            maxOutputTokens: 32768,
+            responseMimeType: "application/json",
+            responseSchema: invoiceSchema,
+          },
+        }),
+        signal: controller.signal,
+      },
+    );
 
     const upstreamData = await upstream.json().catch(() => null);
     if (!upstream.ok) {
@@ -170,7 +298,14 @@ export default async function handler(request, response) {
     }
 
     const rawText = extractText(upstreamData);
-    if (!rawText) return sendJson(response, 502, { error: "Gemini returned no structured output." });
+    if (!rawText) {
+      const finishReason = upstreamData?.candidates?.[0]?.finishReason;
+      return sendJson(response, 502, {
+        error: finishReason
+          ? `Gemini returned no structured output (finish reason: ${finishReason}).`
+          : "Gemini returned no structured output.",
+      });
+    }
 
     let parsed;
     try {
@@ -180,7 +315,11 @@ export default async function handler(request, response) {
     }
 
     const invoice = validateInvoice(parsed);
-    return sendJson(response, 200, { ...invoice, model, processingTimeMs: Date.now() - started });
+    return sendJson(response, 200, {
+      ...invoice,
+      model,
+      processingTimeMs: Date.now() - started,
+    });
   } catch (error) {
     if (error?.name === "AbortError") return sendJson(response, 504, { error: "Gemini did not respond within 110 seconds." });
     return sendJson(response, 500, { error: error instanceof Error ? error.message : "Unexpected Gemini proxy failure." });
